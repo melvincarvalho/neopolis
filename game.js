@@ -161,7 +161,7 @@ function newGame(seed, attract) {
     cam: { x: 0, y: -60 }, shake: 0,
     cursor: { vx: N >> 1, vy: N >> 1 },
     selPower: 'raise', behavior: 'settle',
-    aiT: 0, hintT: 24, nextId: 1, cool: { quake: [0, 0], swamp: [0, 0], volcano: [0, 0] }, leaderId: [0, 0], aiDecreeT: 0,
+    aiT: 0, hintT: 24, nextId: 1, cool: { quake: [0, 0], swamp: [0, 0], volcano: [0, 0] }, leaderId: [0, 0], aiDecreeT: 0, strikeT: [-1, -1],
     stats: { t: [], pop: [[], []], deform: [0, 0], powers: [{}, {}] },
   };
   // starting flats + seed walkers for both gods, mirrored for fairness
@@ -249,7 +249,7 @@ function castRaise(team, vx, vy, dir) {
   if (!influence(team, vx, vy)) { G.deny = 'OUT OF INFLUENCE'; return false; }
   const i = vy * N + vx;
   const nh = clamp(G.H[i] + dir, 0, HMAX);
-  if (nh === G.H[i]) return false;
+  if (nh === G.H[i]) { G.deny = 'LAND AT ITS LIMIT'; return false; }
   G.mana[team] -= p.cost;
   G.H[i] = nh;
   G.stats.deform[team]++;
@@ -317,7 +317,7 @@ function castVolcano(team, vx, vy) {
     if (d > 4.2) continue;
     const i = y * N + x;
     G.H[i] = Math.max(G.H[i], Math.round(peak - d * 1.3));
-    if (d < 3.4) G.poison.set(i, G.time + 60);   // rock cools for a minute
+    if (d < 3.4) G.poison.set(i, Infinity);      // volcanic rock is a permanent scar (canon)
   }
   G.shake = 8;
   recalcSetts();
@@ -371,8 +371,10 @@ function sim(dt) {
   // armageddon staging: rumble, then the cities fall from the center outward
   if (G.armageddon) {
     G.argT += dt;
-    G.shake = Math.max(G.shake, 3 + Math.sin(G.time * 2) * 2);
-    if (G.argT > 1.4 && G.argQueue && G.argQueue.length) {
+    G.shake = Math.max(G.shake, Math.min(9, 1.5 + G.argT * 1.2) + Math.sin(G.time * 7) * 1.5);
+    G.argCollapseT = (G.argCollapseT || 0) - dt;
+    if (G.argT > 1.4 && G.argCollapseT <= 0 && G.argQueue && G.argQueue.length) {
+      G.argCollapseT = 0.25;                        // the world ends at a march, not a dump
       const s = G.argQueue.shift();
       if (G.setts.includes(s)) collapseSett(s);
     }
@@ -386,12 +388,12 @@ function sim(dt) {
   for (const s of G.setts) {
     G.mana[s.team] += (s.level * 0.7 + (s.occ || 0) * 0.2) * dt;
     s.spawnT -= dt * (0.6 + s.level * 0.12);
-    if (s.spawnT <= 0 && countPop(s.team) < 70) {
+    if (s.spawnT <= 0 && countPop(s.team) < 110) {
       s.spawnT = rng(4, 7);
       spawnWalker(s.team, s.tx + 0.5 + rng(-0.4, 0.4), s.ty + 0.5 + rng(-0.4, 0.4), 14 + s.level * 7 + Math.min(5, s.occ || 0) * 4, s.id);
     }
   }
-  for (const w of G.walkers) G.mana[w.team] += 0.018 * dt;
+  for (const w of G.walkers) G.mana[w.team] += 0.05 * dt;
   for (const t of [0, 1]) G.mana[t] = Math.min(G.mana[t], 4000);
 
   // walkers
@@ -417,9 +419,9 @@ function sim(dt) {
   }
   // canon: a wandering walker reaching a foreign friendly settlement joins it — but the young must first leave home
   for (const w of G.walkers) {
-    if (w.dead || w.knight || w.mode !== 'settle' || w.age < 6) continue;
+    if (w.dead || w.knight || w.mode !== 'settle' || w.age < 3) continue;
     for (const s of G.setts) {
-      if (s.team === w.team && s.id !== w.home && (s.occ || 0) < s.level &&
+      if (s.team === w.team && s.id !== w.home && (s.occ || 0) < Math.min(4, s.level) &&
           Math.abs(s.tx + 0.5 - w.x) < 0.6 && Math.abs(s.ty + 0.5 - w.y) < 0.6) {
         s.occ = Math.min(8, (s.occ || 0) + 1);
         w.dead = true;
@@ -474,8 +476,15 @@ function sim(dt) {
     }
   }
   G.walkers = G.walkers.filter(w => !w.dead);
-  // volcanic rock cools
-  for (const [k2, until] of G.poison) if (G.time > until) G.poison.delete(k2);
+  // volcanic rock glitters with embers
+  if (G.tick % 24 === 0 && G.poison.size) {
+    let n3 = 0;
+    for (const k2 of G.poison.keys()) {
+      if (n3++ > 2) break;
+      const px3 = k2 % N, py3 = (k2 / N) | 0;
+      G.parts.push({ kind: 'chip', x: px3 + rng(0, 1), y: py3 + rng(0, 1), vx: 0, vy: 0, z: 2, vz: rng(25, 55), color: '#ff8c42', life: rng(0.5, 1), t: 0 });
+    }
+  }
 
   // knights leave a burning wake
   if (G.tick % 5 === 0) for (const w of G.walkers) {
@@ -587,16 +596,16 @@ function godPolicy(team, style) {
   if (attacks) {
     // the closer: armageddon when clearly ahead, or when the world has gone on long enough
     if (can('armageddon') && ((ratio > 1.5 && G.time > 120) || (ratio > 1.15 && G.time > 300) ||
-        (G.strikeT !== undefined && G.strikeT >= 0 && G.time > G.strikeT + 3) ||
-        (G.time > (aggro ? 600 : 480)))) { castArmageddon(team); return; }
+        (G.strikeT[team] >= 0 && G.time > G.strikeT[team] + 3 && ratio > 0.9) ||
+        (G.time > (aggro ? 600 : 480) && ratio >= 1.02))) { castArmageddon(team); return; }
     // the authored finisher: volcano their capital, then end the world on the ruins
     if (aggro && G.mana[team] >= POWERS.volcano.cost + POWERS.armageddon.cost) {
       const ck = biggestCluster(1 - team);
       if (ck && influence(team, ck[0], ck[1])) {
-        if (castVolcano(team, ck[0], ck[1])) { G.strikeT = G.time; return; }
+        if (castVolcano(team, ck[0], ck[1])) { G.strikeT[team] = G.time; return; }
       }
     }
-    if (!hoarding && G.mana[team] > (aggro ? 1200 : 1800)) {
+    if (G.mana[team] > (aggro ? 1200 : 1800)) {   // the war chest and the apocalypse fund are separate budgets
       if (can('knight') && totalPop(team) > (aggro ? 10 : 14) && !G.walkers.some(w => w.team === team && w.knight)) { castKnight(team); return; }
       const c = biggestCluster(1 - team);
       if (can('quake') && c && G.time > (G.cool.quake[team] || 0) && influence(team, c[0], c[1])) { G.cool.quake[team] = G.time + 30; castQuake(team, c[0], c[1]); return; }
@@ -783,6 +792,9 @@ function tickFX(dt) {
     } else if (p.kind === 'ring') p.r += 60 * dt;
   }
   for (let i = G.pops.length - 1; i >= 0; i--) { const o = G.pops[i]; o.t += dt; if (o.t >= o.life) G.pops.splice(i, 1); }
+  for (const s of G.setts) if (s.growT > 0) s.growT = Math.max(0, s.growT - dt);
+  if (G.toast) G.toast.t += dt;
+  G.manaFlashT = Math.max(0, (G.manaFlashT || 0) - dt);
   // camera keys
   const cs = 320 * dt;
   if (keys.a || keys.ArrowLeft) G.cam.x -= cs;
@@ -904,7 +916,7 @@ function draw() {
   }
   ctx.globalAlpha = 1;
   if (G.armageddon) {
-    ctx.fillStyle = `rgba(255,30,50,${0.05 + Math.sin(G.time * 2) * 0.02})`;
+    ctx.fillStyle = `rgba(255,30,50,${Math.min(0.16, 0.06 + G.argT * 0.01) + Math.sin(G.time * 2) * 0.02})`;
     ctx.fillRect(0, 0, VW, VH);
   }
   ctx.restore();
@@ -950,7 +962,7 @@ function drawTile(tx, ty) {
     ctx.fillStyle = `rgb(${6 + k2 * 14 | 0},${10 + k2 * (26 + wave * 8) | 0},${20 + k2 * (46 + wave * 10) | 0})`;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
     if (cd === 1) {
-      ctx.strokeStyle = hexA('#5fd4ff', 0.1 + wave * 0.12);
+      ctx.strokeStyle = hexA('#6e86c8', 0.12 + wave * 0.12);
       ctx.lineWidth = 1;
       ctx.stroke();
     }
@@ -980,7 +992,7 @@ function drawTile(tx, ty) {
   ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
   if (flat && !poisoned) {
-    ctx.strokeStyle = 'rgba(120,180,220,0.07)';
+    ctx.strokeStyle = 'rgba(110,125,175,0.08)';
     ctx.lineWidth = 1;
     ctx.stroke();
   }
@@ -988,13 +1000,13 @@ function drawTile(tx, ty) {
   if (slope >= 2) {
     ctx.fillStyle = `rgba(0,0,10,${Math.min(0.35, slope * 0.09)})`;
     ctx.fill();
-    ctx.strokeStyle = hexA('#5fd4ff', 0.1 + slope * 0.04);
+    ctx.strokeStyle = hexA('#5a6da8', 0.14 + slope * 0.05);
     ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x3, y3); ctx.lineTo(x2, y2); ctx.lineTo(x1, y1); ctx.stroke();
   }
   const coast = H00 <= G.water || H10 <= G.water || H01 <= G.water || H11 <= G.water;
   if (coast) {
-    ctx.strokeStyle = hexA('#33d6ff', 0.25 + Math.sin(G.time * 2 + tx + ty) * 0.08);
+    ctx.strokeStyle = hexA('#5f79c2', 0.28 + Math.sin(G.time * 2 + tx + ty) * 0.08);
     ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.stroke();
   }
@@ -1025,7 +1037,7 @@ function drawSett(s) {
   const lv = s.level;
   const wpx = 8 + lv * 1.6, hpx = 6 + lv * 3.4;
   ctx.save();
-  if (s.growT > 0) { const g2 = 1 + s.growT * 0.6; ctx.translate(sx, sy); ctx.scale(g2, g2); ctx.translate(-sx, -sy); s.growT = Math.max(0, s.growT - 0.016); }
+  if (s.growT > 0) { const g2 = 1 + s.growT * 0.6; ctx.translate(sx, sy); ctx.scale(g2, g2); ctx.translate(-sx, -sy); }
   // contact shadow: the building sits on its ground
   ctx.fillStyle = 'rgba(0,0,8,0.5)';
   ctx.beginPath(); ctx.ellipse(sx, sy + 1, wpx + 4, (wpx + 4) / 2.1, 0, 0, 7); ctx.fill();
@@ -1068,11 +1080,10 @@ function drawSett(s) {
   if (s.burnT > 0) {
     ctx.fillStyle = hexA('#ffd12a', 0.5 + Math.sin(G.time * 20) * 0.3);
     ctx.beginPath(); ctx.ellipse(sx, sy - hpx, 6, 9, 0, 0, 7); ctx.fill();
-    s.burnT = Math.max(0, s.burnT - 0.008);
   }
   // window glow: occupancy made visible — no debug digits
-  const rows = Math.min(3, Math.ceil(lv / 3)), cols = Math.min(4, 1 + (lv % 4));
-  ctx.fillStyle = hexA(c, 0.75);
+  const rows = Math.min(3, Math.ceil(lv / 3)), cols = Math.min(4, Math.ceil(lv / 2));
+  ctx.fillStyle = hexA(c, 0.75 + (s.growT > 0 ? 0.25 : 0));
   for (let ry = 0; ry < rows; ry++) for (let cx2 = 0; cx2 < cols; cx2++) {
     if ((s.id + ry * 3 + cx2) % 5 === 0) continue;   // some windows dark
     ctx.fillRect(sx - wpx * 0.5 + 3 + cx2 * 5, sy - 5 - ry * (hpx / (rows + 1)) - hpx * 0.35, 1.6, 2.4);
@@ -1092,8 +1103,8 @@ function drawWalker(w) {
   const c = w.knight ? '#ffd12a' : TEAM[w.team].col;
   const scale = w.knight ? 1.7 : 1;
   ctx.save();
-  ctx.fillStyle = 'rgba(0,0,8,0.45)';
-  ctx.beginPath(); ctx.ellipse(sx, sy + 0.5, 3.5 * scale, 1.6 * scale, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,10,0.6)';
+  ctx.beginPath(); ctx.ellipse(sx, sy + 0.5, 4.5 * scale, 2 * scale, 0, 0, 7); ctx.fill();
   ctx.translate(sx, sy); ctx.scale(scale, scale); ctx.translate(-sx, -sy);
   ctx.globalCompositeOperation = 'lighter';
   const gp = ctx.createRadialGradient(sx, sy - 4, 0, sx, sy - 4, 12);
@@ -1128,7 +1139,6 @@ function drawWalker(w) {
     ctx.restore();
   }
   if (w.fightT > 0) {
-    w.fightT -= 0.016;
     ctx.strokeStyle = hexA('#ffffff', 0.7);
     ctx.beginPath(); ctx.arc(sx, sy - 8, 6 + Math.sin(G.time * 30) * 2, 0, 7); ctx.stroke();
   }
@@ -1258,7 +1268,7 @@ function drawHUD() {
     ctx.letterSpacing = '0.5px';
     ctx.textAlign = 'center';
     ctx.fillStyle = afford ? 'rgba(210,232,255,0.95)' : 'rgba(160,195,230,0.4)';
-    ctx.fillText(p === 'armageddon' ? 'ARMAGEDN' : p.toUpperCase(), bx + bw / 2, by + 40);
+    ctx.fillText(p.toUpperCase(), bx + bw / 2, by + 40);
     ctx.letterSpacing = '0px';
     if (POWERS[p].target === 'global') {
       ctx.font = '700 6.5px Verdana, sans-serif';
@@ -1279,7 +1289,6 @@ function drawHUD() {
   // mana bar + behavior + magnet
   const mx0 = 652, mw0 = 180;
   label('MANA', mx0, HY);
-  G.manaFlashT = Math.max(0, (G.manaFlashT || 0) - 0.016);
   ctx.fillStyle = G.manaFlashT > 0 ? 'rgba(255,60,60,0.25)' : 'rgba(255,255,255,0.06)';
   ctx.beginPath(); ctx.roundRect(mx0, HY + 38, mw0, 12, 5); ctx.fill();
   const mk = clamp(G.mana[0] / 4000, 0, 1);
@@ -1358,9 +1367,8 @@ function drawHUD() {
   ctx.strokeStyle = 'rgba(240,250,255,0.8)'; ctx.lineWidth = 1;
   ctx.strokeRect(mmx + (cvx - 10) * sc, mmy + (cvy - 7) * sc, 20 * sc, 14 * sc);
   for (const t of [0, 1]) if (G.magnet[t]) {
-    ctx.fillStyle = TEAM[t].col;
+    ctx.strokeStyle = TEAM[t].col; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.arc(mmx + G.magnet[t][0] * sc, mmy + G.magnet[t][1] * sc, 2.5, 0, 7); ctx.stroke();
-    ctx.strokeStyle = TEAM[t].col; ctx.lineWidth = 1.2; ctx.stroke();
   }
   // hover tooltip: every power teaches itself
   if (hovTip) {
@@ -1383,9 +1391,8 @@ function drawHUD() {
     ctx.fillText(P2.desc + (P2.target === 'global' ? '' : ' at the cursor'), tx2 + 10, ty2 + 34);
   }
   // denial toast at the cursor
-  if (G.toast && G.toast.t < 1.2) {
-    G.toast.t += 0.016;
-    const k3 = 1 - G.toast.t / 1.2;
+  if (G.toast && G.toast.t < (G.toast.life || 1.2)) {
+    const k3 = 1 - G.toast.t / (G.toast.life || 1.2);
     ctx.globalAlpha = Math.min(1, k3 * 2);
     ctx.font = '800 12px Verdana, sans-serif';
     ctx.letterSpacing = '1px';
@@ -1521,7 +1528,7 @@ window.addEventListener('keydown', e => {
   if ((G.mode === 'won' || G.mode === 'lost') && e.key === ' ' && G.modeT > 0.6) { newGame((Math.random() * 1e9) >>> 0, false); return; }
   const pk = POWER_ORDER.find(p => POWERS[p].key.toLowerCase() === k);
   if (pk) G.selPower = pk;
-  if (k === 'b') G.behavior = G.behavior === 'settle' ? 'magnet' : 'settle', applyBehavior();
+  if (k === 'b' && !G.armageddon) { G.behavior = G.behavior === 'settle' ? 'magnet' : 'settle'; applyBehavior(); }
   if (k === 'p' && !e.repeat) G.paused = !G.paused;
   if (e.key === 'Escape') { G.selPower = 'raise'; G.confirm = null; }
 });
@@ -1569,11 +1576,16 @@ canvas.addEventListener('mousedown', e => {
     if (G.behavior === 'magnet') applyBehavior();
     return;
   }
-  // world-enders demand a second click
+  // world-enders demand a second click — but only ones you can afford
   if ((G.selPower === 'flood' || G.selPower === 'armageddon') &&
       !(G.confirm && G.confirm.p === G.selPower && G.time - G.confirm.t < 3)) {
+    if (G.mana[0] < POWERS[G.selPower].cost) {
+      G.toast = { txt: `NEED ${POWERS[G.selPower].cost} MANA`, t: 0 };
+      G.manaFlashT = 0.5;
+      return;
+    }
     G.confirm = { p: G.selPower, t: G.time };
-    G.toast = { txt: 'CLICK AGAIN TO UNLEASH ' + G.selPower.toUpperCase(), t: 0 };
+    G.toast = { txt: 'CLICK AGAIN TO UNLEASH ' + G.selPower.toUpperCase(), t: 0, life: 3 };
     return;
   }
   G.confirm = null;
@@ -1635,6 +1647,7 @@ function runShot(name) {
   AUDIO_ON = false;
   newGame(778899, false);
   G.hintT = 0;
+  if (name !== 'overview' && name !== 'raise') { G.cursor.vx = -99; G.cursor.vy = -99; }
   if (name === 'title') {
     G.showTitle = true; G.attract = true;
     stepFor(1.5);
@@ -1671,13 +1684,19 @@ function runShot(name) {
     stepFor(1.5);
     camOn(l ? l.x : 15, l ? l.y : 15);
   } else if (name === 'swamp') {
-    G.botPlays = true; G.botStyle = 'full';
-    stepFor(60);
-    G.mana[0] = 400;
-    const e2 = nearestEnemyFlat(0) || [20, 20];
-    castSwamp(0, e2[0], e2[1]);
-    stepFor(1);
-    camOn(e2[0], e2[1]);
+    G.botPlays = true; G.botStyle = 'flatonly'; G.aiStyle = 'flatonly';
+    stepFor(70);
+    G.mana[0] = 600;
+    // stage inside our own influence: bog the frontier of the home plateau
+    let placed = null;
+    for (const s of G.setts) {
+      if (s.team !== 0 || placed) continue;
+      for (const [dx2, dy2] of [[2, 0], [0, 2], [-2, 0], [0, -2], [2, 2]]) {
+        if (castSwamp(0, s.tx + dx2, s.ty + dy2)) { placed = [s.tx + dx2, s.ty + dy2]; break; }
+      }
+    }
+    stepFor(1.2);
+    camOn(placed ? placed[0] : 11, placed ? placed[1] : 11);
   } else if (name === 'quake') {
     G.botPlays = true; G.botStyle = 'full';
     stepFor(80);
@@ -1695,28 +1714,31 @@ function runShot(name) {
     stepFor(4);
     camOn(16, 13);
   } else if (name === 'armageddon') {
-    G.botPlays = true; G.botStyle = 'full';
-    stepFor(120);
+    G.botPlays = true; G.botStyle = 'flatonly'; G.aiStyle = 'flatonly';
+    stepFor(150);
     G.mana[0] = 3000;
     castArmageddon(0);
-    stepFor(14);
+    stepFor(2.6);                                   // mid-collapse: the wavefront, not the aftermath
     camOn(N / 2, N / 2);
   } else if (name === 'volcano') {
     G.botPlays = true; G.botStyle = 'flatonly'; G.aiStyle = 'flatonly';
     stepFor(70);
     G.mana[0] = 1200;
-    const vt = nearestEnemyFlat(0) || [16, 16];
-    castVolcano(0, vt[0], vt[1]) || castVolcano(0, 14, 14);
-    stepFor(1.4);
+    const bc = biggestCluster(0) || [11, 11];
+    const vt = [bc[0] + 4, bc[1] + 3];
+    castVolcano(0, vt[0], vt[1]) || castVolcano(0, bc[0] + 3, bc[1]);
+    stepFor(1.6);
     camOn(vt[0], vt[1]);
   } else if (name === 'win') {
-    G.botPlays = true; G.botStyle = 'full'; G.aiStyle = 'passive';
-    stepUntil(() => G.mode === 'won', 30 * 400);
+    G.botPlays = true; G.botStyle = 'player'; G.aiStyle = 'none';
+    stepUntil(() => G.mode === 'won', 30 * 900);
     stepFor(0.3);
+    if (G.mode !== 'won') { document.title = 'shot-FAILED:' + JSON.stringify({ mode: G.mode, pop: [totalPop(0), totalPop(1)], mana: Math.floor(G.mana[0]), t: Math.floor(G.time), arg: G.armageddon, p0: G.stats.powers[0] }); return; }
   } else if (name === 'fail') {
     G.botPlays = true; G.botStyle = 'none'; G.aiStyle = 'full';
-    stepUntil(() => G.mode === 'lost', 30 * 400);
+    stepUntil(() => G.mode === 'lost', 30 * 800);
     stepFor(0.3);
+    if (G.mode !== 'lost') { document.title = 'shot-FAILED'; return; }
   } else {
     stepFor(2);
   }
