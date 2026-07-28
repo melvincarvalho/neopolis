@@ -93,7 +93,20 @@ function genTerrain(seed) {
     }
   }
   const Hgt = new Int8Array(N * N);
-  for (let i = 0; i < N * N; i++) Hgt[i] = clamp(Math.round(Hf[i]), 0, HMAX);
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
+    const a = Hf[y * N + x], b = Hf[(N - 1 - y) * N + (N - 1 - x)];
+    Hgt[y * N + x] = clamp(Math.round((a + b) / 2), 0, HMAX);
+  }
+  // the wilderness is hostile: without a god's hand, almost nothing is flat enough to farm
+  for (let y = 3; y < N - 3; y++) for (let x = 3; x < N - 3; x++) {
+    const mi = (N - 1 - y) * N + (N - 1 - x), i = y * N + x;
+    if (i > mi) continue;                      // jitter once, mirror to keep the world fair
+    if (rand() < 0.32 && Hgt[i] > 0) {
+      const j = (rand() < 0.5 ? -1 : 1) * (rand() < 0.12 ? 2 : 1);
+      Hgt[i] = clamp(Hgt[i] + j, Hgt[i] > 1 ? 1 : 0, HMAX);
+      Hgt[mi] = Hgt[i];
+    }
+  }
   // ocean border
   for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) {
     const b = Math.min(x, y, N - 1 - x, N - 1 - y);
@@ -103,7 +116,24 @@ function genTerrain(seed) {
   return Hgt;
 }
 function hAt(x, y) { return G.H[clamp(y, 0, N - 1) * N + clamp(x, 0, N - 1)]; }
+function hVisAt(x, y) { return G.Hvis[clamp(y, 0, N - 1) * N + clamp(x, 0, N - 1)]; }
+function recalcCoast() {
+  const d = new Uint8Array(N * N).fill(9);
+  const q2 = [];
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) if (G.H[y * N + x] > G.water) { d[y * N + x] = 0; q2.push(x, y); }
+  for (let qi = 0; qi < q2.length; qi += 2) {
+    const x = q2[qi], y = q2[qi + 1], dv = d[y * N + x];
+    if (dv >= 7) continue;
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = x + dx, ny = y + dy;
+      if (nx < 0 || ny < 0 || nx >= N || ny >= N) continue;
+      if (d[ny * N + nx] > dv + 1) { d[ny * N + nx] = dv + 1; q2.push(nx, ny); }
+    }
+  }
+  G.coast = d;
+}
 function tileFlat(tx, ty) {
+  if (G.poison.has(ty * N + tx)) return -1;      // volcanic rock will not bear a roof
   const h = hAt(tx, ty);
   return h > G.water && h === hAt(tx + 1, ty) && h === hAt(tx, ty + 1) && h === hAt(tx + 1, ty + 1) ? h : -1;
 }
@@ -124,18 +154,20 @@ function levelOf(score) { return clamp(Math.ceil(score / 3.2), 1, 8); }
 function newGame(seed, attract) {
   G = {
     seed, time: 0, tick: 0, attract: !!attract, showTitle: !!attract,
-    H: genTerrain(seed), water: 0,
+    H: genTerrain(seed), water: 0, poison: new Map(), waterVis: 0,
     walkers: [], setts: [], swamps: [], parts: [], pops: [],
     mana: [180, 180], magnet: [null, null], magnetOn: [false, false],
     mode: 'play', modeT: 0, endT: 0, armageddon: false,
     cam: { x: 0, y: -60 }, shake: 0,
     cursor: { vx: N >> 1, vy: N >> 1 },
     selPower: 'raise', behavior: 'settle',
-    aiT: 0, hintT: 9, nextId: 1, cool: { quake: [0, 0], swamp: [0, 0] },
+    aiT: 0, hintT: 24, nextId: 1, cool: { quake: [0, 0], swamp: [0, 0], volcano: [0, 0] }, leaderId: [0, 0], aiDecreeT: 0,
     stats: { t: [], pop: [[], []], deform: [0, 0], powers: [{}, {}] },
   };
   // starting flats + seed walkers for both gods, mirrored for fairness
   seedStart(0, 10, 10);
+  G.Hvis = Float32Array.from(G.H);
+  recalcCoast();
   seedStart(1, N - 13, N - 13);
   G.cam.x = isoX(11, 11) - 0;
   G.cam.y = isoY(11, 11, hAt(11, 11)) - VH / 2 + 40;
@@ -145,9 +177,9 @@ function seedStart(team, cx, cy) {
   for (let y = -2; y <= 3; y++) for (let x = -2; x <= 3; x++) G.H[(cy + y) * N + (cx + x)] = h;
   for (let i = 0; i < 5; i++) spawnWalker(team, cx + 0.5 + rng(-1.5, 1.5), cy + 0.5 + rng(-1.5, 1.5), 30);
 }
-function spawnWalker(team, x, y, str) {
+function spawnWalker(team, x, y, str, home) {
   G.walkers.push({
-    id: G.nextId++, team, x, y, tx: x, ty: y,
+    id: G.nextId++, team, x, y, tx: x, ty: y, home: home || 0,
     str, age: 0, mode: 'settle', knight: false, fightT: 0, wanderT: 0, dir: rng(0, 6.28),
   });
 }
@@ -156,13 +188,13 @@ function spawnWalker(team, x, y, str) {
 function settleAt(w) {
   const tx = Math.floor(w.x), ty = Math.floor(w.y);
   if (tileFlat(tx, ty) < 0) return false;
-  if (G.setts.some(s => Math.abs(s.tx - tx) <= 1 && Math.abs(s.ty - ty) <= 1)) return false;
+  if (G.setts.some(s => Math.max(Math.abs(s.tx - tx), Math.abs(s.ty - ty)) <= (s.level >= 5 ? 2 : 1))) return false;
   if (G.swamps.some(s => s.tx === tx && s.ty === ty)) return false;
   const score = flatScore(tx, ty);
-  if (score < 4) return false;
+  if (score < 3) return false;
   G.setts.push({
     id: G.nextId++, team: w.team, tx, ty, h: tileFlat(tx, ty),
-    level: levelOf(score), spawnT: rng(2, 5), popT: 0, burnT: 0,
+    level: levelOf(score), lastLevel: levelOf(score), spawnT: rng(2, 5), popT: 0, burnT: 0, occ: 0, growT: 0,
   });
   SFX.settle();
   addRing(tx + 0.5, ty + 0.5, TEAM[w.team].col);
@@ -172,16 +204,23 @@ function collapseSett(s, silent) {
   // the people walk free; the building is gone — a city yields a crowd, a hut yields one soul
   const idx = G.setts.indexOf(s);
   if (idx >= 0) G.setts.splice(idx, 1);
-  const n = Math.ceil(s.level / 2);
+  const n = Math.ceil(s.level / 2) + Math.ceil((s.occ || 0) / 3);
   for (let i = 0; i < n; i++) spawnWalker(s.team, s.tx + 0.5 + rng(-0.5, 0.5), s.ty + 0.5 + rng(-0.5, 0.5), 16 + s.level * 3);
   if (!silent) { SFX.collapse(); addBurst(s.tx + 0.5, s.ty + 0.5, TEAM[s.team].col, 10); }
 }
 function recalcSetts() {
+  recalcCoast();
   for (const s of [...G.setts]) {
     const h = tileFlat(s.tx, s.ty);
     if (h < 0 || h <= G.water) { collapseSett(s); continue; }
     s.h = h;
     s.level = levelOf(flatScore(s.tx, s.ty));
+    if (s.level > (s.lastLevel || 0)) {
+      s.growT = 0.4;
+      addRing(s.tx + 0.5, s.ty + 0.5, TEAM[s.team].col);
+      addPop(s.tx + 0.5, s.ty + 0.5, 'LVL ' + s.level, TEAM[s.team].col);
+    }
+    s.lastLevel = s.level;
   }
 }
 
@@ -194,16 +233,20 @@ function influence(team, vx, vy) {
 
 // ---------- divine powers ----------
 const POWERS = {
-  raise: { cost: 12, key: 'Q' }, lower: { cost: 12, key: 'W' },
-  swamp: { cost: 180, key: 'E' }, quake: { cost: 420, key: 'R' },
-  knight: { cost: 650, key: 'T' }, flood: { cost: 1400, key: 'F' },
-  armageddon: { cost: 2600, key: 'G' },
+  raise: { cost: 6, key: 'Q', target: 'vertex', desc: 'Lift one vertex of land' },
+  lower: { cost: 6, key: 'W', target: 'vertex', desc: 'Sink one vertex of land' },
+  swamp: { cost: 180, key: 'E', target: 'tile', desc: 'Lay a bog that swallows walkers' },
+  quake: { cost: 420, key: 'R', target: 'vertex', desc: 'Shatter and sink the land nearby' },
+  knight: { cost: 650, key: 'T', target: 'global', desc: 'Anoint your leader a knight' },
+  volcano: { cost: 900, key: 'V', target: 'vertex', desc: 'Raise a poisoned mountain of rock' },
+  flood: { cost: 1400, key: 'F', target: 'global', desc: 'Raise the sea over the lowlands' },
+  armageddon: { cost: 2600, key: 'G', target: 'global', desc: 'The final battle. No more powers.' },
 };
 function castRaise(team, vx, vy, dir) {
-  if (G.armageddon) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
   const p = POWERS[dir > 0 ? 'raise' : 'lower'];
-  if (G.mana[team] < p.cost) return false;
-  if (!influence(team, vx, vy)) return false;
+  if (G.mana[team] < p.cost) { G.deny = `NEED ${p.cost} MANA`; return false; }
+  if (!influence(team, vx, vy)) { G.deny = 'OUT OF INFLUENCE'; return false; }
   const i = vy * N + vx;
   const nh = clamp(G.H[i] + dir, 0, HMAX);
   if (nh === G.H[i]) return false;
@@ -212,21 +255,25 @@ function castRaise(team, vx, vy, dir) {
   G.stats.deform[team]++;
   recalcSetts();
   (dir > 0 ? SFX.raise : SFX.lower)();
-  addBurst(vx, vy, TEAM[team].col, 4);
+  addBurst(vx, vy, '#8a7d6a', 10);
+  addRing(vx, vy, TEAM[team].col);
   logPower(team, dir > 0 ? 'raise' : 'lower');
   return true;
 }
 function castSwamp(team, tx, ty) {
-  if (G.armageddon || G.mana[team] < POWERS.swamp.cost) return false;
-  if (tileFlat(tx, ty) < 0 || !influence(team, tx, ty)) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.mana[team] < POWERS.swamp.cost) { G.deny = `NEED ${POWERS.swamp.cost} MANA`; return false; }
+  if (tileFlat(tx, ty) < 0) { G.deny = 'NEEDS FLAT LAND'; return false; }
+  if (!influence(team, tx, ty)) { G.deny = 'OUT OF INFLUENCE'; return false; }
   G.mana[team] -= POWERS.swamp.cost;
-  G.swamps.push({ tx, ty, team, uses: 4 });
+  G.swamps.push({ tx, ty, team, kills: 0 });
   SFX.swamp(); logPower(team, 'swamp');
   return true;
 }
 function castQuake(team, vx, vy) {
-  if (G.armageddon || G.mana[team] < POWERS.quake.cost) return false;
-  if (!influence(team, vx, vy)) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.mana[team] < POWERS.quake.cost) { G.deny = `NEED ${POWERS.quake.cost} MANA`; return false; }
+  if (!influence(team, vx, vy)) { G.deny = 'OUT OF INFLUENCE'; return false; }
   G.mana[team] -= POWERS.quake.cost;
   srand((G.seed ^ (G.tick * 7919) ^ (vx * 131 + vy)) >>> 0);
   for (let dy = -3; dy <= 3; dy++) for (let dx = -3; dx <= 3; dx++) {
@@ -234,11 +281,12 @@ function castQuake(team, vx, vy) {
     if (x < 2 || y < 2 || x > N - 3 || y > N - 3) continue;
     if (Math.hypot(dx, dy) > 3.4) continue;
     const i = y * N + x;
-    G.H[i] = clamp(G.H[i] + (rand() < 0.5 ? -1 : 1) * (rand() < 0.3 ? 2 : 1), 0, HMAX);
+    G.H[i] = clamp(G.H[i] - (1 + ((x + y) & 1)), 0, HMAX);   // checkerboard drop: nothing stays flat
   }
   G.shake = 9;
   recalcSetts();
   SFX.quake(); logPower(team, 'quake');
+  for (let i = 0; i < 9; i++) addBurst(vx + rng(-3, 3), vy + rng(-3, 3), '#8a7d6a', 5);
   return true;
 }
 function leaderOf(team) {
@@ -247,16 +295,41 @@ function leaderOf(team) {
   return best;
 }
 function castKnight(team) {
-  if (G.armageddon || G.mana[team] < POWERS.knight.cost) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.mana[team] < POWERS.knight.cost) { G.deny = `NEED ${POWERS.knight.cost} MANA`; return false; }
   const l = leaderOf(team);
-  if (!l) return false;
+  if (!l) { G.deny = 'NO LEADER LEFT'; return false; }
   G.mana[team] -= POWERS.knight.cost;
   l.knight = true; l.str = Math.max(l.str * 2, 120); l.mode = 'magnet';
   SFX.knight(); addRing(l.x, l.y, '#ffd12a'); logPower(team, 'knight');
   return true;
 }
+function castVolcano(team, vx, vy) {
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.mana[team] < POWERS.volcano.cost) { G.deny = `NEED ${POWERS.volcano.cost} MANA`; return false; }
+  if (!influence(team, vx, vy)) { G.deny = 'OUT OF INFLUENCE'; return false; }
+  G.mana[team] -= POWERS.volcano.cost;
+  const peak = Math.min(HMAX, hAt(vx, vy) + 5);
+  for (let dy = -4; dy <= 4; dy++) for (let dx = -4; dx <= 4; dx++) {
+    const x = vx + dx, y = vy + dy;
+    if (x < 2 || y < 2 || x > N - 3 || y > N - 3) continue;
+    const d = Math.hypot(dx, dy);
+    if (d > 4.2) continue;
+    const i = y * N + x;
+    G.H[i] = Math.max(G.H[i], Math.round(peak - d * 1.3));
+    if (d < 3.4) G.poison.set(i, G.time + 60);   // rock cools for a minute
+  }
+  G.shake = 8;
+  recalcSetts();
+  SFX.quake(); logPower(team, 'volcano');
+  addBurst(vx, vy, '#ff8c42', 22);
+  addRing(vx, vy, '#ff8c42');
+  return true;
+}
 function castFlood(team) {
-  if (G.armageddon || G.mana[team] < POWERS.flood.cost || G.water >= 3) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.water >= 3) { G.deny = 'THE SEA IS AT ITS HEIGHT'; return false; }
+  if (G.mana[team] < POWERS.flood.cost) { G.deny = `NEED ${POWERS.flood.cost} MANA`; return false; }
   G.mana[team] -= POWERS.flood.cost;
   G.water++;
   recalcSetts();
@@ -269,19 +342,24 @@ function castFlood(team) {
   return true;
 }
 function castArmageddon(team) {
-  if (G.armageddon || G.mana[team] < POWERS.armageddon.cost) return false;
+  if (G.armageddon) { G.deny = 'THE END HAS BEGUN'; return false; }
+  if (G.mana[team] < POWERS.armageddon.cost) { G.deny = `NEED ${POWERS.armageddon.cost} MANA`; return false; }
   G.mana[team] -= POWERS.armageddon.cost;
   G.armageddon = true;
-  for (const s of [...G.setts]) collapseSett(s, true);
+  G.argT = 0;
+  // the world ends from the center outward
+  G.argQueue = [...G.setts].sort((a, b) =>
+    Math.hypot(a.tx - N / 2, a.ty - N / 2) - Math.hypot(b.tx - N / 2, b.ty - N / 2));
   for (const w of G.walkers) { w.mode = 'armageddon'; }
   SFX.gg(); logPower(team, 'armageddon');
   G.shake = 12;
   return true;
 }
 function logPower(team, p) { G.stats.powers[team][p] = (G.stats.powers[team][p] || 0) + 1; }
-function killWalker(w) {
+function killWalker(w, how) {
   w.dead = true;
-  addBurst(w.x, w.y, TEAM[w.team].col, 6);
+  if (how === 'sink') G.parts.push({ kind: 'sink', x: w.x, y: w.y, color: TEAM[w.team].col, life: 0.5, t: 0 });
+  else addBurst(w.x, w.y, TEAM[w.team].col, 6);
 }
 
 // ---------- simulation ----------
@@ -290,15 +368,30 @@ function sim(dt) {
   if (G.mode !== 'play') { tickFX(dt); return; }
   G.hintT = Math.max(0, G.hintT - dt);
 
+  // armageddon staging: rumble, then the cities fall from the center outward
+  if (G.armageddon) {
+    G.argT += dt;
+    G.shake = Math.max(G.shake, 3 + Math.sin(G.time * 2) * 2);
+    if (G.argT > 1.4 && G.argQueue && G.argQueue.length) {
+      const s = G.argQueue.shift();
+      if (G.setts.includes(s)) collapseSett(s);
+    }
+  }
+  for (const w of G.walkers) w.fightT = Math.max(0, w.fightT - dt);
+  // the land heaves toward its true shape; the sea climbs slowly
+  const ease = Math.min(1, 5.5 * dt);
+  for (let i = 0; i < N * N; i++) G.Hvis[i] += (G.H[i] - G.Hvis[i]) * ease;
+  G.waterVis += (G.water - G.waterVis) * Math.min(1, 2.2 * dt);
   // mana income: worship flows from settlements (canon: population is mana)
   for (const s of G.setts) {
-    G.mana[s.team] += s.level * 0.55 * dt;
+    G.mana[s.team] += (s.level * 0.7 + (s.occ || 0) * 0.2) * dt;
     s.spawnT -= dt * (0.6 + s.level * 0.12);
     if (s.spawnT <= 0 && countPop(s.team) < 70) {
       s.spawnT = rng(4, 7);
-      spawnWalker(s.team, s.tx + 0.5 + rng(-0.4, 0.4), s.ty + 0.5 + rng(-0.4, 0.4), 14 + s.level * 7);
+      spawnWalker(s.team, s.tx + 0.5 + rng(-0.4, 0.4), s.ty + 0.5 + rng(-0.4, 0.4), 14 + s.level * 7 + Math.min(5, s.occ || 0) * 4, s.id);
     }
   }
+  for (const w of G.walkers) G.mana[w.team] += 0.018 * dt;
   for (const t of [0, 1]) G.mana[t] = Math.min(G.mana[t], 4000);
 
   // walkers
@@ -307,6 +400,34 @@ function sim(dt) {
     w.age += dt;
     stepWalker(w, dt);
   }
+  // canon: walkers who meet combine their strength
+  for (let i = 0; i < G.walkers.length; i++) {
+    const a = G.walkers[i];
+    if (a.dead || a.knight || a.str >= 90 || a.age < 2) continue;
+    for (let j = i + 1; j < G.walkers.length; j++) {
+      const b = G.walkers[j];
+      if (b.dead || b.knight || b.team !== a.team || b.str >= 90 || b.age < 2) continue;
+      if (Math.abs(a.x - b.x) < 0.4 && Math.abs(a.y - b.y) < 0.4) {
+        a.str = Math.min(160, a.str + b.str * 0.8);
+        a.age = Math.max(a.age, b.age);
+        b.dead = true;
+        addRing(a.x, a.y, TEAM[a.team].col);
+      }
+    }
+  }
+  // canon: a wandering walker reaching a foreign friendly settlement joins it — but the young must first leave home
+  for (const w of G.walkers) {
+    if (w.dead || w.knight || w.mode !== 'settle' || w.age < 6) continue;
+    for (const s of G.setts) {
+      if (s.team === w.team && s.id !== w.home && (s.occ || 0) < s.level &&
+          Math.abs(s.tx + 0.5 - w.x) < 0.6 && Math.abs(s.ty + 0.5 - w.y) < 0.6) {
+        s.occ = Math.min(8, (s.occ || 0) + 1);
+        w.dead = true;
+        break;
+      }
+    }
+  }
+  G.walkers = G.walkers.filter(w => !w.dead);
   // fights: opposing walkers on the same tile
   for (let i = 0; i < G.walkers.length; i++) {
     const a = G.walkers[i];
@@ -325,29 +446,46 @@ function sim(dt) {
     }
   }
   // knights raze settlements they reach
+  const burned = new Set();
   for (const w of G.walkers) {
     if (w.dead || !w.knight) continue;
     for (const s of G.setts) {
       if (s.team !== w.team && Math.abs(s.tx + 0.5 - w.x) < 1 && Math.abs(s.ty + 0.5 - w.y) < 1) {
         s.burnT += dt;
+        burned.add(s);
         if (s.burnT > 1.2) { collapseSett(s); addBurst(w.x, w.y, '#ffd12a', 14); }
       }
     }
   }
+  for (const s of G.setts) if (!burned.has(s) && s.burnT > 0) s.burnT = Math.max(0, s.burnT - dt);
   G.walkers = G.walkers.filter(w => !w.dead);
 
-  // swamps swallow
+  // swamps swallow anyone — and persist until the land itself is changed (canon)
   for (const sw of [...G.swamps]) {
     for (const w of G.walkers) {
-      if (!w.knight && Math.floor(w.x) === sw.tx && Math.floor(w.y) === sw.ty) {
-        killWalker(w); SFX.die();
-        sw.uses--;
+      if (Math.floor(w.x) === sw.tx && Math.floor(w.y) === sw.ty) {
+        killWalker(w, 'sink'); SFX.die();
+        sw.kills++;
       }
     }
-    if (sw.uses <= 0) G.swamps.splice(G.swamps.indexOf(sw), 1);
+    const h = hAt(sw.tx, sw.ty);
+    if (h <= G.water || h !== hAt(sw.tx + 1, sw.ty) || h !== hAt(sw.tx, sw.ty + 1) || h !== hAt(sw.tx + 1, sw.ty + 1)) {
+      G.swamps.splice(G.swamps.indexOf(sw), 1);   // raised or drowned away
+    }
   }
   G.walkers = G.walkers.filter(w => !w.dead);
+  // volcanic rock cools
+  for (const [k2, until] of G.poison) if (G.time > until) G.poison.delete(k2);
 
+  // knights leave a burning wake
+  if (G.tick % 5 === 0) for (const w of G.walkers) {
+    if (w.knight) G.parts.push({ kind: 'chip', x: w.x, y: w.y, vx: 0, vy: 0, z: 3, vz: 8, color: '#ffd12a', life: 0.45, t: 0 });
+  }
+  // crown the eldest: the leader wears the ankh
+  for (const t of [0, 1]) {
+    const l = leaderOf(t);
+    G.leaderId[t] = l ? l.id : 0;
+  }
   // AI god
   G.aiT += dt;
   if (G.aiT > 0.5) { G.aiT = 0; godPolicy(1, G.aiStyle || 'full'); if (G.botPlays) godPolicy(0, G.botStyle); }
@@ -366,16 +504,14 @@ function sim(dt) {
     G.modeT = 0;
     (p1 === 0 ? SFX.win : SFX.fail)();
   }
-  if (G.armageddon && G.walkers.length && G.walkers.every(w => Math.hypot(w.x - N / 2, w.y - N / 2) < 3.5)) {
-    // final melee resolves by numbers — no more running
-  }
   tickFX(dt);
 }
 function countPop(team) { return G.walkers.filter(w => w.team === team).length + G.setts.filter(s => s.team === team).length; }
 function totalPop(team) {
+  // the census counts everyone: strong merged walkers, building levels, and the housed
   let p = 0;
-  for (const w of G.walkers) if (w.team === team) p += 1;
-  for (const s of G.setts) if (s.team === team) p += s.level;
+  for (const w of G.walkers) if (w.team === team) p += Math.max(1, Math.round(w.str / 30));
+  for (const s of G.setts) if (s.team === team) p += s.level + (s.occ || 0);
   return p;
 }
 
@@ -383,7 +519,11 @@ function stepWalker(w, dt) {
   const speed = w.knight ? 2.6 : 1.7;
   let goal = null;
   if (G.armageddon || w.mode === 'armageddon') goal = [N / 2, N / 2];
-  else if (w.mode === 'magnet' && G.magnet[w.team]) goal = G.magnet[w.team];
+  else if (w.mode === 'magnet' && G.magnet[w.team]) {
+    const lead = G.walkers.find(w2 => w2.id === G.leaderId[w.team]);
+    if (!lead || lead === w || w.knight) goal = G.magnet[w.team];   // the leader (and knights) walk to the magnet
+    else goal = [lead.x, lead.y];                                    // the flock follows the leader
+  }
   else if (w.knight) {
     // hunt nearest enemy settlement, then walkers
     let best = null, bd = 1e9;
@@ -399,8 +539,9 @@ function stepWalker(w, dt) {
       const x = tx + dx, y = ty + dy;
       if (x < 2 || y < 2 || x >= N - 3 || y >= N - 3) continue;
       if (tileFlat(x, y) < 0) continue;
-      if (flatScore(x, y) < 4) continue;
+      if (flatScore(x, y) < 3) continue;
       if (G.setts.some(s => Math.abs(s.tx - x) <= 1 && Math.abs(s.ty - y) <= 1)) continue;
+      if (G.swamps.some(s2 => Math.abs(s2.tx - x) <= 1 && Math.abs(s2.ty - y) <= 1)) continue;   // nobody farms a bog
       const d = Math.abs(dx) + Math.abs(dy);
       if (d < bd) { bd = d; best = [x + 0.5, y + 0.5]; }
     }
@@ -436,25 +577,82 @@ function godPolicy(team, style) {
   if (G.armageddon) return;
   style = style || 'full';
   const can = p => G.mana[team] >= POWERS[p].cost;
-  const attacks = style === 'full' || style === 'noflat';
+  const attacks = style === 'full' || style === 'noflat' || style === 'player';
+  const aggro = style === 'player';    // the authored strategy: strike earlier, rally harder
+  const ratio = totalPop(team) / Math.max(1, totalPop(1 - team));
+  // hoarding: once the end of the world is the plan, every other purchase stops
+  const fund = aggro ? POWERS.volcano.cost + POWERS.armageddon.cost + 200 : POWERS.armageddon.cost + 200;
+  const hoarding = attacks && G.mana[team] < fund &&
+    ((G.time > 100 && ratio > 1.35) || G.time > 380);
   if (attacks) {
-    const ratio = totalPop(team) / Math.max(1, totalPop(1 - team));
-    // the closer: armageddon when clearly ahead — a god game must end
-    if (can('armageddon') && ((ratio > 1.5 && G.time > 120) || (ratio > 1.15 && G.time > 300))) { castArmageddon(team); return; }
-    if (ratio > 1.35) { /* hoard for the end of the world */ }
-    else if (G.mana[team] > 1800) {
-      if (can('knight') && totalPop(team) > 14 && !G.walkers.some(w => w.team === team && w.knight)) { castKnight(team); return; }
+    // the closer: armageddon when clearly ahead, or when the world has gone on long enough
+    if (can('armageddon') && ((ratio > 1.5 && G.time > 120) || (ratio > 1.15 && G.time > 300) ||
+        (G.strikeT !== undefined && G.strikeT >= 0 && G.time > G.strikeT + 3) ||
+        (G.time > (aggro ? 600 : 480)))) { castArmageddon(team); return; }
+    // the authored finisher: volcano their capital, then end the world on the ruins
+    if (aggro && G.mana[team] >= POWERS.volcano.cost + POWERS.armageddon.cost) {
+      const ck = biggestCluster(1 - team);
+      if (ck && influence(team, ck[0], ck[1])) {
+        if (castVolcano(team, ck[0], ck[1])) { G.strikeT = G.time; return; }
+      }
+    }
+    if (!hoarding && G.mana[team] > (aggro ? 1200 : 1800)) {
+      if (can('knight') && totalPop(team) > (aggro ? 10 : 14) && !G.walkers.some(w => w.team === team && w.knight)) { castKnight(team); return; }
       const c = biggestCluster(1 - team);
       if (can('quake') && c && G.time > (G.cool.quake[team] || 0) && influence(team, c[0], c[1])) { G.cool.quake[team] = G.time + 30; castQuake(team, c[0], c[1]); return; }
       const e = nearestEnemyFlat(team);
       if (can('swamp') && e && G.time > (G.cool.swamp[team] || 0)) { G.cool.swamp[team] = G.time + 12; castSwamp(team, e[0], e[1]); return; }
+      // volcano the enemy heartland when rich — but not more than once a minute
+      if (G.mana[team] > POWERS.volcano.cost + 400 && G.time > (G.cool.volcano[team] || 0)) {
+        const c3 = biggestCluster(1 - team);
+        if (c3 && influence(team, c3[0], c3[1])) { G.cool.volcano[team] = G.time + 60; castVolcano(team, c3[0], c3[1]); return; }
+      }
+      // flood when holding the high ground
+      if (G.mana[team] > POWERS.flood.cost + 600 && G.water < 3) {
+        const alt = t2 => {
+          const xs = [...G.walkers.filter(w => w.team === t2).map(w => hAt(Math.floor(w.x), Math.floor(w.y))),
+                      ...G.setts.filter(s => s.team === t2).map(s => s.h)];
+          return xs.length ? xs.reduce((a2, b2) => a2 + b2, 0) / xs.length : 0;
+        };
+        if (alt(team) > alt(1 - team) + 1.2) { castFlood(team); return; }
+      }
     }
   }
-  // the economy: flatten land for the faithful
-  if (style !== 'noflat' && can('raise')) {
-    const target = findFlattenTarget(team);
+  // the magnet as a weapon: rally the horde at the enemy when strong (canon CPU god shoves its magnet constantly)
+  if (attacks && (team === 1 || aggro)) {
+    if (G.aiDecree === undefined) G.aiDecree = [0, 0];
+    G.aiDecree[team] -= 0.5;
+    if (G.aiDecree[team] <= 0) {
+      G.aiDecree[team] = aggro ? 30 : 40;
+      if (ratio > (aggro ? 1.2 : 1.25) || (aggro && G.mana[team] > 3000)) {
+        const c2 = biggestCluster(1 - team);
+        if (c2) {
+          G.magnet[team] = [c2[0] + 0.5, c2[1] + 0.5];
+          for (const w of G.walkers) if (w.team === team && !w.knight) w.mode = 'magnet';
+        }
+      } else {
+        G.magnet[team] = null;
+        for (const w of G.walkers) if (w.team === team && !w.knight) w.mode = 'settle';
+      }
+    }
+  }
+  // the economy: flatten land for the faithful — unless the apocalypse fund comes first
+  if (style !== 'noflat' && !hoarding && can('raise')) {
+    const target = findFlattenTarget(team) || findPlateauTarget(team);
     if (target) castRaise(team, target[0], target[1], target[2]);
   }
+}
+function flatDelta(vx2, vy2, dir2) {
+  // simulate the vertex move: net change in flat tiles among the four it touches
+  const tiles = [[vx2 - 1, vy2 - 1], [vx2, vy2 - 1], [vx2 - 1, vy2], [vx2, vy2]];
+  const count = () => tiles.reduce((a2, [ox, oy]) => a2 + (tileFlat(ox, oy) >= 0 ? 1 : 0), 0);
+  const i2 = vy2 * N + vx2;
+  const before = count();
+  const old = G.H[i2];
+  G.H[i2] = clamp(old + dir2, 0, HMAX);
+  const after = count();
+  G.H[i2] = old;
+  return after - before;
 }
 function findFlattenTarget(team) {
   // scan tiles near own walkers/settlements: a tile one-vertex-off flat is a cheap farm
@@ -479,11 +677,56 @@ function findFlattenTarget(team) {
         if (Math.abs(d) > Math.abs(vd)) { vd = d; vi = k; }
       }
       if (vi < 0) continue;
-      const gain = 10 - Math.abs(vd) - (Math.abs(dx) + Math.abs(dy)) * 0.4;
-      if (gain > bestGain && influence(team, corners[vi][0], corners[vi][1])) {
-        bestGain = gain;
-        best = [corners[vi][0], corners[vi][1], vd > 0 ? -1 : 1];
+      // first, do no harm: never move a vertex that holds up a roof
+      const [cvx2, cvy2] = corners[vi];
+      let harms = false;
+      for (const [ox, oy] of [[cvx2 - 1, cvy2 - 1], [cvx2, cvy2 - 1], [cvx2 - 1, cvy2], [cvx2, cvy2]]) {
+        if (G.setts.some(s2 => s2.tx === ox && s2.ty === oy)) { harms = true; break; }
       }
+      if (harms) continue;
+      const dir3 = vd > 0 ? -1 : 1;
+      if (flatDelta(cvx2, cvy2, dir3) < 0) continue;   // never trade farmland away
+      const gain = 10 - Math.abs(vd) - (Math.abs(dx) + Math.abs(dy)) * 0.4;
+      if (gain > bestGain && influence(team, cvx2, cvy2)) {
+        bestGain = gain;
+        best = [cvx2, cvy2, vd > 0 ? -1 : 1];
+      }
+    }
+  }
+  return best;
+}
+function findPlateauTarget(team) {
+  // the engineer's strategy: extend the home plateau one vertex at a time
+  const own = G.setts.filter(s => s.team === team);
+  if (!own.length) return null;
+  const counts = {};
+  for (const s of own) counts[s.h] = (counts[s.h] || 0) + s.level;
+  const ph = Number(Object.keys(counts).sort((a, b) => counts[b] - counts[a])[0]);
+  let best = null, bestScore = -1e9;
+  for (const s of own) {
+    if (s.h !== ph) continue;
+    for (let dy = -6; dy <= 6; dy++) for (let dx = -6; dx <= 6; dx++) {
+      const vx = s.tx + dx, vy = s.ty + dy;
+      if (vx < 3 || vy < 3 || vx >= N - 3 || vy >= N - 3) continue;
+      const h = hAt(vx, vy);
+      if (h === ph || h <= G.water - 1) continue;
+      // must border the plateau: a ph-flat tile within two steps of this vertex
+      let touches = false;
+      for (let oy = vy - 2; oy <= vy + 1 && !touches; oy++)
+        for (let ox = vx - 2; ox <= vx + 1; ox++)
+          if (tileFlat(ox, oy) === ph) { touches = true; break; }
+      if (!touches) continue;
+      // never move a vertex under a roof
+      let roof = false;
+      for (const [ox, oy] of [[vx - 1, vy - 1], [vx, vy - 1], [vx - 1, vy], [vx, vy]]) {
+        if (G.setts.some(s2 => s2.tx === ox && s2.ty === oy)) { roof = true; break; }
+      }
+      if (roof) continue;
+      const dir = h < ph ? 1 : -1;
+      if (flatDelta(vx, vy, dir) < 0) continue;
+      if (!influence(team, vx, vy)) continue;
+      const score = 20 - Math.abs(h - ph) * 2 - (Math.abs(dx) + Math.abs(dy)) * 0.5;
+      if (score > bestScore) { bestScore = score; best = [vx, vy, dir]; }
     }
   }
   return best;
@@ -506,6 +749,7 @@ function nearestEnemyFlat(team) {
       const tx = s.tx + dx, ty = s.ty + dy;
       if (tileFlat(tx, ty) < 0) continue;
       if (G.setts.some(o => o.tx === tx && o.ty === ty)) continue;
+      if (G.swamps.some(o => o.tx === tx && o.ty === ty)) continue;
       if (!influence(team, tx, ty)) continue;
       const d = Math.abs(dx) + Math.abs(dy);
       if (d < bd) { bd = d; best = [tx, ty]; }
@@ -517,8 +761,11 @@ function nearestEnemyFlat(team) {
 // ---------- fx ----------
 function addBurst(x, y, color, n) {
   for (let i = 0; i < n; i++) {
-    const a = rng(0, 6.28), s = rng(20, 70);
-    G.parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, color, life: rng(0.3, 0.7), t: 0, kind: 'chip' });
+    const a = rng(0, 6.28), s = rng(0.6, 2.4);
+    G.parts.push({
+      x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s,
+      z: rng(2, 10), vz: rng(40, 110), color, life: rng(0.4, 0.9), t: 0, kind: 'chip',
+    });
   }
 }
 function addRing(x, y, color) { G.parts.push({ x, y, r: 4, color, life: 0.5, t: 0, kind: 'ring' }); }
@@ -529,8 +776,11 @@ function tickFX(dt) {
     const p = G.parts[i];
     p.t += dt;
     if (p.t >= p.life) { G.parts.splice(i, 1); continue; }
-    if (p.kind === 'chip') { p.x += p.vx * dt * 0.03; p.y += p.vy * dt * 0.03; }
-    else if (p.kind === 'ring') p.r += 60 * dt;
+    if (p.kind === 'chip') {
+      p.x += p.vx * dt; p.y += p.vy * dt;
+      p.vz -= 260 * dt; p.z += p.vz * dt;
+      if (p.z < 0) { p.z = 0; p.vz *= -0.35; }
+    } else if (p.kind === 'ring') p.r += 60 * dt;
   }
   for (let i = G.pops.length - 1; i >= 0; i--) { const o = G.pops[i]; o.t += dt; if (o.t >= o.life) G.pops.splice(i, 1); }
   // camera keys
@@ -597,6 +847,23 @@ function draw() {
   for (const w of G.walkers) ents.push({ z: w.x + w.y, kind: 'w', o: w });
   ents.sort((a, b) => a.z - b.z);
   for (const e of ents) e.kind === 's' ? drawSett(e.o) : drawWalker(e.o);
+  // armageddon: the sky bleeds and a beacon calls everyone home
+  if (G.armageddon) {
+    const [bx2, by2] = worldToScreen(N / 2, N / 2, hVisAt(N >> 1, N >> 1));
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const beam = ctx.createLinearGradient(bx2, by2 - VH, bx2, by2);
+    beam.addColorStop(0, 'rgba(255,60,80,0)');
+    beam.addColorStop(0.7, `rgba(255,70,90,${0.16 + Math.sin(G.time * 4) * 0.06})`);
+    beam.addColorStop(1, `rgba(255,120,140,${0.35 + Math.sin(G.time * 4) * 0.1})`);
+    ctx.fillStyle = beam;
+    const bw3 = 26 + Math.sin(G.time * 3) * 5;
+    ctx.fillRect(bx2 - bw3 / 2, by2 - VH, bw3, VH);
+    ctx.beginPath(); ctx.ellipse(bx2, by2, 30, 13, 0, 0, 7);
+    ctx.fillStyle = `rgba(255,90,110,${0.25 + Math.sin(G.time * 5) * 0.1})`;
+    ctx.fill();
+    ctx.restore();
+  }
   // magnets
   for (const t of [0, 1]) if (G.magnet[t]) drawMagnet(t);
   // cursor
@@ -606,11 +873,18 @@ function draw() {
   ctx.globalCompositeOperation = 'lighter';
   for (const p of G.parts) {
     const k = 1 - p.t / p.life;
-    const [sx, sy] = worldToScreen(p.x, p.y, hAt(Math.floor(p.x), Math.floor(p.y)));
+    const [sx, sy] = worldToScreen(p.x, p.y, Math.max(hVisAt(Math.floor(p.x), Math.floor(p.y)), G.waterVis));
     if (p.kind === 'chip') {
       ctx.globalAlpha = k;
       ctx.fillStyle = p.color;
-      ctx.fillRect(sx - 2 + p.vx * p.t * 0.05, sy - 2 + p.vy * p.t * 0.05, 3, 3);
+      ctx.fillRect(sx - 1.5, sy - 1.5 - (p.z || 0), 3, 3);
+    } else if (p.kind === 'sink') {
+      // swallowed: the body slides under the bog
+      ctx.globalAlpha = k;
+      ctx.fillStyle = p.color;
+      ctx.beginPath(); ctx.roundRect(sx - 2, sy - 8 * k, 4, 8 * k, 1.5); ctx.fill();
+      ctx.fillStyle = hexA('#5aff9e', 0.5);
+      ctx.beginPath(); ctx.ellipse(sx, sy, 6, 2.5, 0, 0, 7); ctx.fill();
     } else {
       ctx.globalAlpha = k * 0.9;
       ctx.strokeStyle = p.color; ctx.lineWidth = 2;
@@ -629,62 +903,96 @@ function draw() {
     ctx.fillText(o.txt, sx, sy - o.t * 26);
   }
   ctx.globalAlpha = 1;
+  if (G.armageddon) {
+    ctx.fillStyle = `rgba(255,30,50,${0.05 + Math.sin(G.time * 2) * 0.02})`;
+    ctx.fillRect(0, 0, VW, VH);
+  }
   ctx.restore();
 
   drawTopBar();
   drawHUD();
-  if (G.mode === 'won') { banner('DOMINION', TEAM[0].col, `THE OTHER GOD IS FORGOTTEN — PEAK POP ${Math.max(...G.stats.pop[0], 1)}`); bannerButton('NEW WORLD  ·  SPACE', TEAM[0].col); }
-  if (G.mode === 'lost') { banner('FORGOTTEN', TEAM[1].col, `YOUR LAST WORSHIPPER FELL — SPACE TO TRY AGAIN`); bannerButton('NEW WORLD  ·  SPACE', TEAM[1].col); }
+  if (G.mode === 'won' || G.mode === 'lost') {
+    ctx.fillStyle = 'rgba(4,5,10,0.55)';
+    ctx.fillRect(0, MQ, W, VH);
+    const min2 = Math.floor(G.time / 60), sec2 = Math.floor(G.time % 60);
+    const pc = G.stats.powers[0];
+    const used = POWER_ORDER.filter(p => pc[p]).map(p => `${p.toUpperCase()} ×${pc[p]}`).join(' · ') || 'NO POWERS CAST';
+    if (G.mode === 'won') {
+      banner('DOMINION', TEAM[0].col, `THE OTHER GOD IS FORGOTTEN · ${min2}:${String(sec2).padStart(2, '0')} · PEAK POP ${Math.max(...G.stats.pop[0], 1)}`);
+      bannerButton('NEW WORLD  ·  SPACE', TEAM[0].col);
+    } else {
+      banner('FORGOTTEN', TEAM[1].col, `YOUR LAST WORSHIPPER FELL · ${min2}:${String(sec2).padStart(2, '0')} · PEAK POP ${Math.max(...G.stats.pop[0], 1)}`);
+      bannerButton('NEW WORLD  ·  SPACE', TEAM[1].col);
+    }
+    ctx.font = `700 10px ${MONO}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(180,205,235,0.8)';
+    ctx.fillText(used, W / 2, H / 2 + 56);
+  }
   ctx.drawImage(VIGNETTE, 0, 0);
 }
 function drawTile(tx, ty) {
-  const h00 = hAt(tx, ty), h10 = hAt(tx + 1, ty), h01 = hAt(tx, ty + 1), h11 = hAt(tx + 1, ty + 1);
-  const water = h00 <= G.water && h10 <= G.water && h01 <= G.water && h11 <= G.water;
-  const [x0, y0] = worldToScreen(tx, ty, water ? G.water : h00);
-  const [x1, y1] = worldToScreen(tx + 1, ty, water ? G.water : h10);
-  const [x2, y2] = worldToScreen(tx + 1, ty + 1, water ? G.water : h11);
-  const [x3, y3] = worldToScreen(tx, ty + 1, water ? G.water : h01);
+  const H00 = hAt(tx, ty), H10 = hAt(tx + 1, ty), H01 = hAt(tx, ty + 1), H11 = hAt(tx + 1, ty + 1);
+  const h00 = hVisAt(tx, ty), h10 = hVisAt(tx + 1, ty), h01 = hVisAt(tx, ty + 1), h11 = hVisAt(tx + 1, ty + 1);
+  const water = H00 <= G.water && H10 <= G.water && H01 <= G.water && H11 <= G.water;
+  const wv = G.waterVis;
+  const [x0, y0] = worldToScreen(tx, ty, water ? wv : h00);
+  const [x1, y1] = worldToScreen(tx + 1, ty, water ? wv : h10);
+  const [x2, y2] = worldToScreen(tx + 1, ty + 1, water ? wv : h11);
+  const [x3, y3] = worldToScreen(tx, ty + 1, water ? wv : h01);
   if (Math.max(x0, x1, x2, x3) < -40 || Math.min(x0, x1, x2, x3) > VW + 40) return;
   if (Math.max(y0, y1, y2, y3) < -60 || Math.min(y0, y1, y2, y3) > VH + 60) return;
   if (water) {
-    ctx.fillStyle = '#060a14';
+    // the ocean has depth: darker as it leaves the coast, with a breathing shore band
+    const cd = G.coast ? G.coast[ty * N + tx] : 9;
+    const k2 = Math.max(0, 1 - cd / 5);
+    const wave = Math.sin(G.time * 1.4 + (tx + ty) * 0.7) * 0.5 + 0.5;
+    ctx.fillStyle = `rgb(${6 + k2 * 14 | 0},${10 + k2 * (26 + wave * 8) | 0},${20 + k2 * (46 + wave * 10) | 0})`;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
-    // faint scan shimmer
-    if (((tx * 7 + ty * 13 + (G.tick >> 4)) % 23) === 0) {
-      ctx.fillStyle = 'rgba(51,120,190,0.16)';
-      ctx.fill();
+    if (cd === 1) {
+      ctx.strokeStyle = hexA('#5fd4ff', 0.1 + wave * 0.12);
+      ctx.lineWidth = 1;
+      ctx.stroke();
     }
     return;
   }
   const avg = (h00 + h10 + h01 + h11) / 4;
-  const slope = Math.max(h00, h10, h01, h11) - Math.min(h00, h10, h01, h11);
+  const slope = Math.max(H00, H10, H01, H11) - Math.min(H00, H10, H01, H11);
   const flat = slope === 0;
-  // altitude + slope lighting
-  let base = 0.16 + avg * 0.045;
-  // light from north-west: darker if南east higher
-  base += (h00 - h11) * 0.05;
-  let r = 32 + base * 90, g = 40 + base * 100, b = 58 + base * 120;
-  const tint = tileTeamTint(tx, ty);
-  if (tint) {
-    const [team, k] = tint;
-    const tc = team === 0 ? [40, 160, 200] : [200, 40, 90];
-    r += (tc[0] - r) * k * 0.35; g += (tc[1] - g) * k * 0.35; b += (tc[2] - b) * k * 0.35;
+  const poisoned = G.poison.has(ty * N + tx);
+  // one sun, from the north-west: facets facing it brighten, away-facets fall dark
+  const nx2 = (h00 + h01 - h10 - h11) * 0.5;   // slope toward +x
+  const ny2 = (h00 + h10 - h01 - h11) * 0.5;   // slope toward +y
+  let lum = 0.15 + avg * 0.035 + nx2 * 0.09 + ny2 * 0.055;
+  lum = clamp(lum, 0.05, 0.85);
+  let r = 30 + lum * 105, g = 38 + lum * 118, b = 56 + lum * 138;
+  if (poisoned) {
+    const ember = 0.5 + Math.sin(G.time * 3 + tx * 2 + ty) * 0.3;
+    r = 40 + lum * 60 + ember * 26; g = 26 + lum * 40; b = 24 + lum * 40;
+  } else {
+    const tint = tileTeamTint(tx, ty);
+    if (tint) {
+      const [team, k] = tint;
+      const tc = team === 0 ? [40, 160, 200] : [200, 40, 90];
+      r += (tc[0] - r) * k * 0.35; g += (tc[1] - g) * k * 0.35; b += (tc[2] - b) * k * 0.35;
+    }
   }
   ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
-  // grid whisper on flat land, cliff rims on steps
-  if (flat) {
-    ctx.strokeStyle = 'rgba(120,180,220,0.08)';
+  if (flat && !poisoned) {
+    ctx.strokeStyle = 'rgba(120,180,220,0.07)';
     ctx.lineWidth = 1;
     ctx.stroke();
   }
+  // cliff faces: darken the drop and rim the edge
   if (slope >= 2) {
-    ctx.strokeStyle = hexA('#5fd4ff', 0.12 + slope * 0.05);
+    ctx.fillStyle = `rgba(0,0,10,${Math.min(0.35, slope * 0.09)})`;
+    ctx.fill();
+    ctx.strokeStyle = hexA('#5fd4ff', 0.1 + slope * 0.04);
     ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x3, y3); ctx.lineTo(x2, y2); ctx.lineTo(x1, y1); ctx.stroke();
   }
-  // shoreline glow
-  const coast = h00 <= G.water || h10 <= G.water || h01 <= G.water || h11 <= G.water;
+  const coast = H00 <= G.water || H10 <= G.water || H01 <= G.water || H11 <= G.water;
   if (coast) {
     ctx.strokeStyle = hexA('#33d6ff', 0.25 + Math.sin(G.time * 2 + tx + ty) * 0.08);
     ctx.lineWidth = 1.4;
@@ -692,27 +1000,35 @@ function drawTile(tx, ty) {
   }
 }
 function drawSwamp(sw) {
-  const [sx, sy] = worldToScreen(sw.tx + 0.5, sw.ty + 0.5, tileFlat(sw.tx, sw.ty) > 0 ? tileFlat(sw.tx, sw.ty) : 1);
+  const [sx, sy] = worldToScreen(sw.tx + 0.5, sw.ty + 0.5, Math.max(hVisAt(sw.tx, sw.ty), G.waterVis));
   ctx.save();
   const pulse = 0.5 + Math.sin(G.time * 3 + sw.tx) * 0.25;
-  ctx.fillStyle = hexA('#5aff9e', 0.14 + pulse * 0.1);
-  ctx.strokeStyle = hexA('#5aff9e', 0.5 + pulse * 0.3);
-  ctx.lineWidth = 1.5;
-  ctx.beginPath(); ctx.ellipse(sx, sy, TW * 0.42, TH * 0.42, 0, 0, 7); ctx.fill(); ctx.stroke();
-  for (let i = 0; i < 3; i++) {
-    const bx = sx + Math.sin(G.time * 1.7 + i * 2.1 + sw.ty) * 8;
-    const by = sy - ((G.time * 9 + i * 7) % 12);
-    ctx.fillStyle = hexA('#5aff9e', 0.5);
+  // the bog owns its whole tile
+  ctx.fillStyle = hexA('#0d2418', 0.85);
+  ctx.beginPath(); ctx.ellipse(sx, sy, TW * 0.52, TH * 0.55, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = hexA('#5aff9e', 0.1 + pulse * 0.12);
+  ctx.strokeStyle = hexA('#5aff9e', 0.55 + pulse * 0.3);
+  ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.ellipse(sx, sy, TW * 0.5, TH * 0.52, 0, 0, 7); ctx.fill(); ctx.stroke();
+  ctx.globalCompositeOperation = 'lighter';
+  for (let i = 0; i < 6; i++) {
+    const bx = sx + Math.sin(G.time * 1.7 + i * 2.1 + sw.ty) * (4 + i * 2);
+    const by = sy - ((G.time * (7 + i * 2) + i * 7) % 16);
+    ctx.fillStyle = hexA('#5aff9e', 0.5 * (1 - ((G.time * (7 + i * 2) + i * 7) % 16) / 16));
     ctx.fillRect(bx, by, 2, 2);
   }
   ctx.restore();
 }
 function drawSett(s) {
-  const [sx, sy] = worldToScreen(s.tx + 0.5, s.ty + 0.5, s.h);
+  const [sx, sy] = worldToScreen(s.tx + 0.5, s.ty + 0.5, hVisAt(s.tx, s.ty));
   const c = TEAM[s.team].col;
   const lv = s.level;
   const wpx = 8 + lv * 1.6, hpx = 6 + lv * 3.4;
   ctx.save();
+  if (s.growT > 0) { const g2 = 1 + s.growT * 0.6; ctx.translate(sx, sy); ctx.scale(g2, g2); ctx.translate(-sx, -sy); s.growT = Math.max(0, s.growT - 0.016); }
+  // contact shadow: the building sits on its ground
+  ctx.fillStyle = 'rgba(0,0,8,0.5)';
+  ctx.beginPath(); ctx.ellipse(sx, sy + 1, wpx + 4, (wpx + 4) / 2.1, 0, 0, 7); ctx.fill();
   // ground glow pool
   ctx.globalCompositeOperation = 'lighter';
   const gp = ctx.createRadialGradient(sx, sy, 0, sx, sy, 26 + lv * 3);
@@ -754,18 +1070,31 @@ function drawSett(s) {
     ctx.beginPath(); ctx.ellipse(sx, sy - hpx, 6, 9, 0, 0, 7); ctx.fill();
     s.burnT = Math.max(0, s.burnT - 0.008);
   }
-  // level pips
-  ctx.font = `800 9px ${MONO}`;
-  ctx.textAlign = 'center';
-  ctx.fillStyle = hexA('#ffffff', 0.85);
-  ctx.fillText(String(lv), sx, sy + 9);
+  // window glow: occupancy made visible — no debug digits
+  const rows = Math.min(3, Math.ceil(lv / 3)), cols = Math.min(4, 1 + (lv % 4));
+  ctx.fillStyle = hexA(c, 0.75);
+  for (let ry = 0; ry < rows; ry++) for (let cx2 = 0; cx2 < cols; cx2++) {
+    if ((s.id + ry * 3 + cx2) % 5 === 0) continue;   // some windows dark
+    ctx.fillRect(sx - wpx * 0.5 + 3 + cx2 * 5, sy - 5 - ry * (hpx / (rows + 1)) - hpx * 0.35, 1.6, 2.4);
+  }
+  // digit only under the god's cursor
+  if (!G.attract && Math.abs(G.cursor.vx - s.tx) <= 1 && Math.abs(G.cursor.vy - s.ty) <= 1) {
+    ctx.font = `800 10px ${MONO}`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText('LVL ' + lv + (s.occ ? ' +' + s.occ : ''), sx, sy + 12);
+  }
   ctx.restore();
 }
 function drawWalker(w) {
-  const h = Math.max(hAt(Math.floor(w.x), Math.floor(w.y)), G.water + 0.01);
+  const h = Math.max(hVisAt(Math.floor(w.x), Math.floor(w.y)), G.waterVis + 0.01);
   const [sx, sy] = worldToScreen(w.x, w.y, h);
   const c = w.knight ? '#ffd12a' : TEAM[w.team].col;
+  const scale = w.knight ? 1.7 : 1;
   ctx.save();
+  ctx.fillStyle = 'rgba(0,0,8,0.45)';
+  ctx.beginPath(); ctx.ellipse(sx, sy + 0.5, 3.5 * scale, 1.6 * scale, 0, 0, 7); ctx.fill();
+  ctx.translate(sx, sy); ctx.scale(scale, scale); ctx.translate(-sx, -sy);
   ctx.globalCompositeOperation = 'lighter';
   const gp = ctx.createRadialGradient(sx, sy - 4, 0, sx, sy - 4, 12);
   gp.addColorStop(0, hexA(c, 0.3)); gp.addColorStop(1, 'rgba(0,0,0,0)');
@@ -779,8 +1108,24 @@ function drawWalker(w) {
   ctx.fillStyle = '#e8f4ff';
   ctx.beginPath(); ctx.arc(sx, sy - 10 - bob, 2.2, 0, 7); ctx.fill();
   if (w.knight) {
+    // pennant, cape, and a gold ground ring: the hero reads at any zoom
     ctx.strokeStyle = '#ffd12a'; ctx.lineWidth = 1.4;
     ctx.beginPath(); ctx.moveTo(sx + 3, sy - 12 - bob); ctx.lineTo(sx + 6, sy - 16 - bob); ctx.stroke();
+    ctx.fillStyle = hexA('#ffd12a', 0.5);
+    ctx.beginPath(); ctx.moveTo(sx - 2, sy - 8 - bob); ctx.lineTo(sx - 6, sy - 2); ctx.lineTo(sx - 2, sy - 3); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = hexA('#ffd12a', 0.6 + Math.sin(G.time * 5) * 0.25);
+    ctx.lineWidth = 1.2;
+    ctx.beginPath(); ctx.ellipse(sx, sy + 0.5, 8, 3.6, 0, 0, 7); ctx.stroke();
+  }
+  if (w.id === G.leaderId[w.team] && !w.knight) {
+    // the ankh: the leader is sacred
+    const ay = sy - 16 - bob + Math.sin(G.time * 3 + w.id) * 1.2;
+    ctx.save();
+    ctx.strokeStyle = TEAM[w.team].col; ctx.lineWidth = 1.4;
+    ctx.shadowColor = TEAM[w.team].col; ctx.shadowBlur = 6;
+    ctx.beginPath(); ctx.arc(sx, ay - 2.5, 2, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(sx, ay - 0.5); ctx.lineTo(sx, ay + 4); ctx.moveTo(sx - 2.5, ay + 1); ctx.lineTo(sx + 2.5, ay + 1); ctx.stroke();
+    ctx.restore();
   }
   if (w.fightT > 0) {
     w.fightT -= 0.016;
@@ -791,7 +1136,7 @@ function drawWalker(w) {
 }
 function drawMagnet(t) {
   const [mx, my] = G.magnet[t];
-  const h = Math.max(hAt(Math.floor(mx), Math.floor(my)), G.water);
+  const h = Math.max(hVisAt(Math.floor(mx), Math.floor(my)), G.waterVis);
   const [sx, sy] = worldToScreen(mx, my, h);
   const c = TEAM[t].col;
   ctx.save();
@@ -808,7 +1153,7 @@ function drawMagnet(t) {
 }
 function drawCursor() {
   const { vx, vy } = G.cursor;
-  const [sx, sy] = worldToScreen(vx, vy, hAt(vx, vy));
+  const [sx, sy] = worldToScreen(vx, vy, hVisAt(vx, vy));
   const ok = influence(0, vx, vy);
   const c = ok ? '#ffffff' : '#556677';
   ctx.save();
@@ -831,7 +1176,7 @@ function label(txt, x, HY) {
 function drawTopBar() {
   ctx.fillStyle = '#05080f';
   ctx.fillRect(0, 0, W, MQ);
-  ctx.fillStyle = hexA(TEAM[0].col, 0.55);
+  ctx.fillStyle = 'rgba(200,220,240,0.4)';
   ctx.fillRect(0, MQ - 1.5, W, 1.5);
   ctx.font = '700 13px Verdana, sans-serif';
   ctx.letterSpacing = '2px';
@@ -842,28 +1187,34 @@ function drawTopBar() {
   const min = Math.floor(G.time / 60), sec = Math.floor(G.time % 60);
   ctx.textAlign = 'center';
   ctx.letterSpacing = '3px';
-  ctx.fillText(G.armageddon ? 'ARMAGEDDON' : `WORLD ${String(G.seed).slice(-4)} · ${min}:${String(sec).padStart(2, '0')}`, W / 2, 25);
+  ctx.fillText(G.mode === 'won' ? 'DOMINION' : G.mode === 'lost' ? 'FORGOTTEN' : G.armageddon ? 'ARMAGEDDON' : `WORLD ${String(G.seed).slice(-4)} · ${min}:${String(sec).padStart(2, '0')}`, W / 2, 25);
   ctx.textAlign = 'right';
   ctx.fillStyle = TEAM[1].col;
-  ctx.fillText(`${totalPop(1)} POP`, W - 26, 25);
+  ctx.fillText(`POP ${totalPop(1)}`, W - 26, 25);
   ctx.letterSpacing = '0px';
   if (G.hintT > 0 && !G.attract && G.mode === 'play') {
+    const HINTS = [
+      'RAISE AND LOWER LAND NEAR YOUR PEOPLE · FLAT LAND GROWS SETTLEMENTS · SETTLEMENTS GROW MANA',
+      'WIPE OUT THE OTHER GOD\'S PEOPLE TO WIN · ARMAGEDDON IS THE FINAL CENSUS',
+      'RIGHT-CLICK PLACES THE MAGNET · YOUR LEADER WALKS TO IT · THE FLOCK FOLLOWS THE LEADER',
+    ];
     ctx.globalAlpha = Math.min(1, G.hintT);
     ctx.font = '600 12px Verdana, sans-serif';
     ctx.letterSpacing = '2px';
     ctx.textAlign = 'center';
     ctx.fillStyle = 'rgba(210,232,255,0.9)';
-    ctx.fillText('RAISE AND LOWER LAND NEAR YOUR PEOPLE · FLAT LAND GROWS SETTLEMENTS · SETTLEMENTS GROW MANA', W / 2, MQ + 22);
+    ctx.fillText(HINTS[Math.floor(G.time / 8) % HINTS.length], W / 2, MQ + 22);
     ctx.globalAlpha = 1;
   }
 }
-const POWER_ORDER = ['raise', 'lower', 'swamp', 'quake', 'knight', 'flood', 'armageddon'];
+const POWER_ORDER = ['raise', 'lower', 'swamp', 'quake', 'knight', 'volcano', 'flood', 'armageddon'];
 const POWER_GLYPH = {
   raise: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 7, y + 5); ctx.lineTo(x, y - 6); ctx.lineTo(x + 7, y + 5); ctx.closePath(); ctx.stroke(); },
   lower: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 7, y - 5); ctx.lineTo(x, y + 6); ctx.lineTo(x + 7, y - 5); ctx.closePath(); ctx.stroke(); },
   swamp: (x, y) => { ctx.beginPath(); ctx.ellipse(x, y + 2, 7, 4, 0, 0, 7); ctx.stroke(); ctx.beginPath(); ctx.arc(x - 2, y - 3, 1.5, 0, 7); ctx.arc(x + 3, y - 1, 1.2, 0, 7); ctx.stroke(); },
   quake: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 8, y + 4); ctx.lineTo(x - 3, y - 2); ctx.lineTo(x, y + 3); ctx.lineTo(x + 4, y - 4); ctx.lineTo(x + 8, y + 2); ctx.stroke(); },
   knight: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 4, y + 6); ctx.lineTo(x - 4, y - 3); ctx.lineTo(x, y - 7); ctx.lineTo(x + 4, y - 3); ctx.lineTo(x + 4, y + 6); ctx.closePath(); ctx.stroke(); },
+  volcano: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 8, y + 5); ctx.lineTo(x - 2, y - 5); ctx.moveTo(x + 2, y - 5); ctx.lineTo(x + 8, y + 5); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x - 2, y - 5); ctx.quadraticCurveTo(x, y - 8, x + 2, y - 5); ctx.stroke(); ctx.beginPath(); ctx.arc(x, y - 8, 1.2, 0, 7); ctx.stroke(); },
   flood: (x, y) => { ctx.beginPath(); ctx.moveTo(x - 8, y); ctx.quadraticCurveTo(x - 4, y - 6, x, y); ctx.quadraticCurveTo(x + 4, y + 6, x + 8, y); ctx.stroke(); },
   armageddon: (x, y) => { ctx.beginPath(); ctx.arc(x, y, 6, 0, 7); ctx.stroke(); ctx.beginPath(); ctx.moveTo(x - 8, y); ctx.lineTo(x + 8, y); ctx.moveTo(x, y - 8); ctx.lineTo(x, y + 8); ctx.stroke(); },
 };
@@ -871,18 +1222,17 @@ function drawHUD() {
   const HY = H - HUD_H;
   ctx.fillStyle = '#05080f';
   ctx.fillRect(0, HY, W, HUD_H);
-  ctx.save();
-  ctx.shadowColor = TEAM[0].col; ctx.shadowBlur = 8;
-  ctx.fillStyle = hexA(TEAM[0].col, 0.6);
+  ctx.fillStyle = 'rgba(200,220,240,0.45)';
   ctx.fillRect(0, HY, W, 1.5);
-  ctx.restore();
   // power chips
+  let hovTip = null;
   POWER_ORDER.forEach((p, i) => {
-    const bx = 22 + i * 88, by = HY + 12, bw = 78, bh = 66;
+    const bx = 18 + i * 78, by = HY + 12, bw = 70, bh = 66;
     const cost = POWERS[p].cost;
     const afford = G.mana[0] >= cost && !G.armageddon;
     const armed = G.selPower === p;
     const hov = mouse.x > bx && mouse.x < bx + bw && mouse.y > by && mouse.y < by + bh;
+    if (hov) hovTip = { p, bx, by };
     if (armed && afford) {
       ctx.save();
       ctx.shadowColor = TEAM[0].col; ctx.shadowBlur = 10;
@@ -905,11 +1255,16 @@ function drawHUD() {
     ctx.lineWidth = 1.8; ctx.lineCap = 'round';
     POWER_GLYPH[p](bx + bw / 2, by + 18);
     ctx.font = '700 8px Verdana, sans-serif';
-    ctx.letterSpacing = '1px';
+    ctx.letterSpacing = '0.5px';
     ctx.textAlign = 'center';
     ctx.fillStyle = afford ? 'rgba(210,232,255,0.95)' : 'rgba(160,195,230,0.4)';
-    ctx.fillText(p.toUpperCase(), bx + bw / 2, by + 40);
+    ctx.fillText(p === 'armageddon' ? 'ARMAGEDN' : p.toUpperCase(), bx + bw / 2, by + 40);
     ctx.letterSpacing = '0px';
+    if (POWERS[p].target === 'global') {
+      ctx.font = '700 6.5px Verdana, sans-serif';
+      ctx.fillStyle = 'rgba(160,195,230,0.55)';
+      ctx.fillText('GLOBAL', bx + bw / 2, by + 63);
+    }
     ctx.font = `800 12px ${MONO}`;
     ctx.fillStyle = afford ? '#ffffff' : 'rgba(200,220,245,0.45)';
     ctx.fillText(String(cost), bx + bw / 2, by + 56);
@@ -922,42 +1277,55 @@ function drawHUD() {
     ctx.fillText(POWERS[p].key, bx + bw - 10.5, by + 13.5);
   });
   // mana bar + behavior + magnet
-  const mx0 = 648;
+  const mx0 = 652, mw0 = 180;
   label('MANA', mx0, HY);
-  ctx.fillStyle = 'rgba(255,255,255,0.06)';
-  ctx.beginPath(); ctx.roundRect(mx0, HY + 40, 190, 14, 6); ctx.fill();
-  const mk = clamp(G.mana[0] / 3000, 0, 1);
-  const mg = ctx.createLinearGradient(mx0, 0, mx0 + 190, 0);
+  G.manaFlashT = Math.max(0, (G.manaFlashT || 0) - 0.016);
+  ctx.fillStyle = G.manaFlashT > 0 ? 'rgba(255,60,60,0.25)' : 'rgba(255,255,255,0.06)';
+  ctx.beginPath(); ctx.roundRect(mx0, HY + 38, mw0, 12, 5); ctx.fill();
+  const mk = clamp(G.mana[0] / 4000, 0, 1);
+  const mg = ctx.createLinearGradient(mx0, 0, mx0 + mw0, 0);
   mg.addColorStop(0, '#1a7fa8'); mg.addColorStop(1, TEAM[0].col);
   ctx.fillStyle = mg;
-  ctx.beginPath(); ctx.roundRect(mx0, HY + 40, 190 * mk, 14, 6); ctx.fill();
+  ctx.beginPath(); ctx.roundRect(mx0, HY + 38, mw0 * mk, 12, 5); ctx.fill();
+  // cost ticks: every power is a notch on the bar
+  for (const p of POWER_ORDER) {
+    const tx3 = mx0 + mw0 * (POWERS[p].cost / 4000);
+    ctx.fillStyle = G.mana[0] >= POWERS[p].cost ? 'rgba(240,250,255,0.85)' : 'rgba(160,195,230,0.35)';
+    ctx.fillRect(tx3, HY + 35, 1.4, 18);
+  }
+  // the enemy's fund, thin and red beneath yours
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  ctx.beginPath(); ctx.roundRect(mx0, HY + 56, mw0, 5, 2.5); ctx.fill();
+  ctx.fillStyle = G.mana[1] >= POWERS.armageddon.cost ? '#ff5c5c' : hexA(TEAM[1].col, 0.7);
+  ctx.beginPath(); ctx.roundRect(mx0, HY + 56, mw0 * clamp(G.mana[1] / 4000, 0, 1), 5, 2.5); ctx.fill();
   ctx.font = `800 13px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = '#ffffff';
-  ctx.fillText(String(Math.floor(G.mana[0])), mx0, HY + 74);
+  ctx.fillText(String(Math.floor(G.mana[0])), mx0, HY + 78);
   ctx.font = `700 10px ${MONO}`;
-  ctx.fillStyle = hexA(TEAM[1].col, 0.8);
-  ctx.fillText(`ENEMY ${Math.floor(G.mana[1])}`, mx0 + 90, HY + 74);
+  ctx.fillStyle = G.mana[1] >= POWERS.armageddon.cost ? '#ff5c5c' : hexA(TEAM[1].col, 0.8);
+  ctx.fillText(`ENEMY ${Math.floor(G.mana[1])}${G.mana[1] >= POWERS.armageddon.cost ? ' !' : ''}`, mx0 + 78, HY + 78);
   // behavior toggle
-  const bhx = 872, bhy = HY + 14;
-  label('DECREE', bhx, HY - 2);
+  const bhx = 876;
+  label('DECREE', bhx, HY);
   ;['settle', 'magnet'].forEach((m, i) => {
-    const by2 = bhy + 14 + i * 26, on = G.behavior === m;
-    const hov = mouse.x > bhx && mouse.x < bhx + 128 && mouse.y > by2 && mouse.y < by2 + 22;
-    ctx.fillStyle = on ? hexA(TEAM[0].col, 0.25) : hov ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.04)';
-    ctx.strokeStyle = on ? TEAM[0].col : 'rgba(160,195,230,0.4)';
-    ctx.lineWidth = on ? 1.8 : 1;
+    const by2 = HY + 38 + i * 26, on = G.behavior === m;
+    const dead = G.armageddon || (m === 'magnet' && !G.magnet[0]);
+    const hov = !dead && mouse.x > bhx && mouse.x < bhx + 128 && mouse.y > by2 && mouse.y < by2 + 22;
+    ctx.fillStyle = on && !G.armageddon ? hexA(TEAM[0].col, 0.25) : hov ? 'rgba(255,255,255,0.07)' : 'rgba(255,255,255,0.04)';
+    ctx.strokeStyle = on && !G.armageddon ? TEAM[0].col : dead ? 'rgba(160,195,230,0.18)' : 'rgba(160,195,230,0.4)';
+    ctx.lineWidth = on && !G.armageddon ? 1.8 : 1;
     ctx.beginPath(); ctx.roundRect(bhx, by2, 128, 22, 5); ctx.fill(); ctx.stroke();
     ctx.font = '700 9px Verdana, sans-serif';
     ctx.letterSpacing = '1px';
     ctx.textAlign = 'left';
-    ctx.fillStyle = on ? '#ffffff' : 'rgba(190,215,240,0.8)';
-    ctx.fillText(m === 'settle' ? 'GO SETTLE' : 'TO THE MAGNET', bhx + 10, by2 + 15);
+    ctx.fillStyle = on && !G.armageddon ? '#ffffff' : dead ? 'rgba(160,195,230,0.4)' : 'rgba(190,215,240,0.8)';
+    ctx.fillText(m === 'settle' ? 'GO SETTLE' : (G.magnet[0] ? 'TO THE MAGNET' : 'R-CLICK: PLACE MAGNET'), bhx + 10, by2 + 15);
     ctx.letterSpacing = '0px';
   });
-  ctx.font = `700 9px ${MONO}`;
+  ctx.font = `700 8.5px ${MONO}`;
   ctx.fillStyle = 'rgba(160,195,230,0.6)';
-  ctx.fillText('B TOGGLES · RIGHT-CLICK PLACES MAGNET', bhx, HY + 96);
+  ctx.fillText('B TOGGLES DECREE', bhx, HY + 100);
   // minimap
   const mmx = 1070, mmy = HY + 12, mms = 92;
   ctx.fillStyle = '#080b14';
@@ -984,6 +1352,49 @@ function drawHUD() {
   ctx.fillStyle = 'rgba(190,215,240,0.75)';
   ctx.fillText('WASD PANS', mmx + mms + 14, HY + 50);
   ctx.fillText('P PAUSES', mmx + mms + 14, HY + 66);
+  ctx.fillText('ESC CLEARS', mmx + mms + 14, HY + 82);
+  // viewport marker + magnets on the minimap
+  const [cvx, cvy] = screenToVertex(VW / 2, MQ + VH / 2);
+  ctx.strokeStyle = 'rgba(240,250,255,0.8)'; ctx.lineWidth = 1;
+  ctx.strokeRect(mmx + (cvx - 10) * sc, mmy + (cvy - 7) * sc, 20 * sc, 14 * sc);
+  for (const t of [0, 1]) if (G.magnet[t]) {
+    ctx.fillStyle = TEAM[t].col;
+    ctx.beginPath(); ctx.arc(mmx + G.magnet[t][0] * sc, mmy + G.magnet[t][1] * sc, 2.5, 0, 7); ctx.stroke();
+    ctx.strokeStyle = TEAM[t].col; ctx.lineWidth = 1.2; ctx.stroke();
+  }
+  // hover tooltip: every power teaches itself
+  if (hovTip) {
+    const P2 = POWERS[hovTip.p];
+    const tw2 = 250, th2 = 46, tx2 = clamp(hovTip.bx, 10, W - tw2 - 10), ty2 = HY - th2 - 8;
+    ctx.fillStyle = 'rgba(6,10,18,0.96)';
+    ctx.strokeStyle = 'rgba(180,210,240,0.5)'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.roundRect(tx2, ty2, tw2, th2, 6); ctx.fill(); ctx.stroke();
+    ctx.textAlign = 'left';
+    ctx.font = '800 11px Verdana, sans-serif';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillText(hovTip.p.toUpperCase(), tx2 + 10, ty2 + 17);
+    ctx.font = `700 10px ${MONO}`;
+    ctx.fillStyle = 'rgba(160,195,230,0.9)';
+    ctx.textAlign = 'right';
+    ctx.fillText(`${P2.cost} MANA · ${P2.key} · ${P2.target.toUpperCase()}`, tx2 + tw2 - 10, ty2 + 17);
+    ctx.textAlign = 'left';
+    ctx.font = '600 10px Verdana, sans-serif';
+    ctx.fillStyle = 'rgba(210,232,255,0.85)';
+    ctx.fillText(P2.desc + (P2.target === 'global' ? '' : ' at the cursor'), tx2 + 10, ty2 + 34);
+  }
+  // denial toast at the cursor
+  if (G.toast && G.toast.t < 1.2) {
+    G.toast.t += 0.016;
+    const k3 = 1 - G.toast.t / 1.2;
+    ctx.globalAlpha = Math.min(1, k3 * 2);
+    ctx.font = '800 12px Verdana, sans-serif';
+    ctx.letterSpacing = '1px';
+    ctx.textAlign = 'center';
+    ctx.fillStyle = '#ff5c5c';
+    ctx.fillText(G.toast.txt, clamp(mouse.x, 90, W - 90), clamp(mouse.y - 24 - G.toast.t * 14, MQ + 20, H - HUD_H - 10));
+    ctx.letterSpacing = '0px';
+    ctx.globalAlpha = 1;
+  }
 }
 function banner(title, color, sub) {
   ctx.save();
@@ -1112,6 +1523,7 @@ window.addEventListener('keydown', e => {
   if (pk) G.selPower = pk;
   if (k === 'b') G.behavior = G.behavior === 'settle' ? 'magnet' : 'settle', applyBehavior();
   if (k === 'p' && !e.repeat) G.paused = !G.paused;
+  if (e.key === 'Escape') { G.selPower = 'raise'; G.confirm = null; }
 });
 window.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
 canvas.addEventListener('mousemove', e => {
@@ -1135,13 +1547,18 @@ canvas.addEventListener('mousedown', e => {
   const HY = H - HUD_H;
   if (mouse.y > HY) {
     POWER_ORDER.forEach((p, i) => {
-      const bx = 22 + i * 88;
-      if (mouse.x > bx && mouse.x < bx + 78 && mouse.y > HY + 12 && mouse.y < HY + 78 && G.mana[0] >= POWERS[p].cost) G.selPower = p;
+      const bx = 18 + i * 78;
+      if (mouse.x > bx && mouse.x < bx + 70 && mouse.y > HY + 12 && mouse.y < HY + 78) G.selPower = p;   // arming is free; casting costs
     });
-    ;['settle', 'magnet'].forEach((m, i) => {
-      const by2 = HY + 28 + i * 26;
-      if (mouse.x > 872 && mouse.x < 1000 && mouse.y > by2 && mouse.y < by2 + 22) { G.behavior = m; applyBehavior(); }
+    if (!G.armageddon) ['settle', 'magnet'].forEach((m, i) => {
+      const by2 = HY + 38 + i * 26;
+      if (mouse.x > 876 && mouse.x < 1004 && mouse.y > by2 && mouse.y < by2 + 22 && !(m === 'magnet' && !G.magnet[0])) { G.behavior = m; applyBehavior(); }
     });
+    // minimap: click to pan
+    const mmx = 1070, mmy = HY + 12, mms = 92;
+    if (mouse.x > mmx && mouse.x < mmx + mms && mouse.y > mmy && mouse.y < mmy + mms) {
+      camOn((mouse.x - mmx) / (mms / N), (mouse.y - mmy) / (mms / N));
+    }
     return;
   }
   if (G.mode !== 'play' || G.paused) return;
@@ -1149,20 +1566,39 @@ canvas.addEventListener('mousedown', e => {
   if (e.button === 2) {   // right-click: papal magnet
     G.magnet[0] = [vx + 0.5, vy + 0.5];
     SFX.magnet();
-    applyBehavior();
+    if (G.behavior === 'magnet') applyBehavior();
     return;
   }
+  // world-enders demand a second click
+  if ((G.selPower === 'flood' || G.selPower === 'armageddon') &&
+      !(G.confirm && G.confirm.p === G.selPower && G.time - G.confirm.t < 3)) {
+    G.confirm = { p: G.selPower, t: G.time };
+    G.toast = { txt: 'CLICK AGAIN TO UNLEASH ' + G.selPower.toUpperCase(), t: 0 };
+    return;
+  }
+  G.confirm = null;
+  G.deny = null;
+  let ok = false;
   switch (G.selPower) {
-    case 'raise': castRaise(0, vx, vy, +1); break;
-    case 'lower': castRaise(0, vx, vy, -1); break;
-    case 'swamp': castSwamp(0, vx, vy); break;
-    case 'quake': castQuake(0, vx, vy); break;
-    case 'knight': castKnight(0); break;
-    case 'flood': castFlood(0); break;
-    case 'armageddon': castArmageddon(0); break;
+    case 'raise': ok = castRaise(0, vx, vy, +1); break;
+    case 'lower': ok = castRaise(0, vx, vy, -1); break;
+    case 'swamp': ok = castSwamp(0, vx, vy); break;
+    case 'quake': ok = castQuake(0, vx, vy); break;
+    case 'knight': ok = castKnight(0); break;
+    case 'volcano': ok = castVolcano(0, vx, vy); break;
+    case 'flood': ok = castFlood(0); break;
+    case 'armageddon': ok = castArmageddon(0); break;
+  }
+  if (!ok && G.deny) {
+    G.toast = { txt: G.deny, t: 0 };
+    G.manaFlashT = 0.5;
+    blip(160, 90, 0.12, 'square', 0.06);
+  } else if (ok && (G.selPower === 'knight' || G.selPower === 'flood' || G.selPower === 'armageddon')) {
+    G.selPower = 'raise';   // one-shot powers disarm themselves
   }
 });
 function applyBehavior() {
+  if (G.armageddon) return;   // no decrees at the end of the world
   for (const w of G.walkers) if (w.team === 0 && !w.knight) w.mode = G.behavior === 'magnet' && G.magnet[0] ? 'magnet' : 'settle';
 }
 
@@ -1265,6 +1701,14 @@ function runShot(name) {
     castArmageddon(0);
     stepFor(14);
     camOn(N / 2, N / 2);
+  } else if (name === 'volcano') {
+    G.botPlays = true; G.botStyle = 'flatonly'; G.aiStyle = 'flatonly';
+    stepFor(70);
+    G.mana[0] = 1200;
+    const vt = nearestEnemyFlat(0) || [16, 16];
+    castVolcano(0, vt[0], vt[1]) || castVolcano(0, 14, 14);
+    stepFor(1.4);
+    camOn(vt[0], vt[1]);
   } else if (name === 'win') {
     G.botPlays = true; G.botStyle = 'full'; G.aiStyle = 'passive';
     stepUntil(() => G.mode === 'won', 30 * 400);
@@ -1298,16 +1742,15 @@ function runVerify(mode) {
   newGame(seed, false);
   let outcome = 'FAILED', extra = {};
   const matches = {
-    solution: ['full', 'full'], null: ['none', 'full'],
+    solution: ['player', 'full'], null: ['none', 'full'],
     'ablate-flatten': ['noflat', 'full'], 'ablate-powers': ['flatonly', 'full'],
   };
   if (matches[mode]) {
     const [b0, b1] = matches[mode];
     G.botPlays = true; G.botStyle = b0; G.aiStyle = b1;
-    // the authored edge: the player-god thinks slightly faster than the demon
-    if (mode === 'solution') G.solutionEdge = true;
     let simTime = 0;
-    const cap = Number(new URLSearchParams(location.search).get('t') || 420);
+    const defCap = mode === 'ablate-powers' ? 1600 : 900;   // "cannot finish" must be earned, not asserted
+    const cap = Number(new URLSearchParams(location.search).get('t') || defCap);
     while (simTime < cap && G.mode === 'play') { sim(STEP); simTime += STEP; }
     const p0 = totalPop(0), p1 = totalPop(1);
     outcome = G.mode === 'won' ? 'WON' : G.mode === 'lost' ? 'LOST' : (p0 > p1 * 1.5 ? 'AHEAD' : p1 > p0 * 1.5 ? 'BEHIND' : 'STALEMATE');
@@ -1339,6 +1782,80 @@ function runVerify(mode) {
       outcome = G.setts.length < nBefore ? 'SOLVED' : 'FAILED';
       extra = { before: nBefore, after: G.setts.length };
     }
+  } else if (mode === 'mech-swamp') {
+    // canon rule: the bog swallows whoever steps in — and persists
+    G.botPlays = false; G.aiStyle = 'none';
+    stepFor(6);
+    const w = G.walkers.find(w2 => w2.team === 0);
+    if (w) {
+      const tx = Math.floor(w.x) + 1, ty = Math.floor(w.y);
+      G.swamps.push({ tx, ty, team: 1, kills: 0 });
+      G.magnet[0] = [tx + 0.5, ty + 0.5];
+      G.behavior = 'magnet';
+      applyBehavior();
+      const before = G.walkers.filter(w2 => w2.team === 0).length;
+      stepFor(15);
+      const after = G.walkers.filter(w2 => w2.team === 0).length;
+      const sw = G.swamps[0];
+      outcome = after < before && sw && sw.kills >= 1 ? 'SOLVED' : 'FAILED';
+      extra = { before, after, kills: sw ? sw.kills : 0, persists: !!sw };
+    }
+  } else if (mode === 'mech-quake') {
+    // canon rule: an earthquake breaks flat land and the towns on it
+    G.botPlays = false; G.aiStyle = 'none';
+    stepFor(25);
+    const s = G.setts.find(s2 => s2.team === 0);
+    if (s) {
+      const before = G.setts.length;
+      G.mana[0] = 999; 
+      const okq = castQuake(0, s.tx, s.ty);
+      recalcSetts();
+      outcome = okq && G.setts.length < before ? 'SOLVED' : 'FAILED';
+      extra = { cast: okq, before, after: G.setts.length };
+    }
+  } else if (mode === 'mech-flood') {
+    // canon rule: the flood drowns the lowlands
+    G.botPlays = false; G.aiStyle = 'none';
+    stepFor(20);
+    const low = () => G.walkers.filter(w2 => hAt(Math.floor(w2.x), Math.floor(w2.y)) <= 1).length
+                    + G.setts.filter(s2 => s2.h <= 1).length;
+    const beforeLow = low(), beforePop = totalPop(0) + totalPop(1);
+    G.mana[0] = 2000;
+    const okf = castFlood(0);
+    stepFor(1);
+    const afterPop = totalPop(0) + totalPop(1);
+    outcome = okf && (afterPop < beforePop || beforeLow === 0) ? 'SOLVED' : 'FAILED';
+    extra = { cast: okf, beforeLow, beforePop, afterPop, water: G.water };
+  } else if (mode === 'mech-merge') {
+    // canon rule: walkers who meet combine their strength
+    G.botPlays = false; G.aiStyle = 'none';
+    stepFor(4);
+    const ws = G.walkers.filter(w2 => w2.team === 0);
+    if (ws.length >= 2) {
+      const a2 = ws[0], b2 = ws[1];
+      const strA = a2.str, strB = b2.str, before = G.walkers.filter(w2 => w2.team === 0).length;
+      b2.x = a2.x; b2.y = a2.y;
+      stepFor(0.2);
+      const after = G.walkers.filter(w2 => w2.team === 0).length;
+      outcome = after === before - 1 && a2.str > strA ? 'SOLVED' : 'FAILED';
+      extra = { before, after, strA, strB, merged: Math.round(a2.str) };
+    }
+  } else if (mode === 'mech-leader') {
+    // canon rule: only the leader walks to the magnet; the flock follows the leader
+    G.botPlays = false; G.aiStyle = 'none';
+    stepFor(6);
+    G.magnet[0] = [30, 30];
+    G.behavior = 'magnet';
+    applyBehavior();
+    stepFor(6);
+    const lead = G.walkers.find(w2 => w2.id === G.leaderId[0]);
+    const others = G.walkers.filter(w2 => w2.team === 0 && w2 !== lead);
+    if (lead && others.length) {
+      const dLead = Math.hypot(lead.x - 30, lead.y - 30);
+      const dFlock = others.reduce((a3, w2) => a3 + Math.hypot(w2.x - lead.x, w2.y - lead.y), 0) / others.length;
+      outcome = dLead < 24 && dFlock < 8 ? 'SOLVED' : 'FAILED';
+      extra = { leaderDistToMagnet: Math.round(dLead * 10) / 10, flockDistToLeader: Math.round(dFlock * 10) / 10 };
+    }
   } else if (mode === 'mech-magnet') {
     // canon rule: the papal magnet commands the faithful
     G.botPlays = false; G.aiStyle = 'none';
@@ -1356,6 +1873,12 @@ function runVerify(mode) {
     outcome = d1 < d0 - 3 ? 'SOLVED' : 'FAILED';
     extra = { before: Math.round(d0 * 10) / 10, after: Math.round(d1 * 10) / 10 };
   }
+  extra.dbg = {
+    f0: findFlattenTarget(0), p0: findPlateauTarget(0),
+    setts: [G.setts.filter(s2 => s2.team === 0).length, G.setts.filter(s2 => s2.team === 1).length],
+    walkers: [G.walkers.filter(w2 => w2.team === 0).length, G.walkers.filter(w2 => w2.team === 1).length],
+    swamps: G.swamps.length, poison: G.poison.size, water: G.water, armageddon: G.armageddon,
+  };
   const report = { mode, outcome, seed, ...extra };
   document.title = 'VERIFY:' + JSON.stringify(report);
   const el = document.createElement('pre');
@@ -1364,13 +1887,6 @@ function runVerify(mode) {
   document.body.appendChild(el);
   draw();
 }
-
-// solution edge: the player-bot god acts on a faster clock (declared in README)
-const _sim = sim;
-sim = function (dt) {
-  _sim(dt);
-  if (G.solutionEdge && G.mode === 'play' && G.tick % 9 === 0) godPolicy(0, G.botStyle);
-};
 
 const q = new URLSearchParams(location.search);
 const shotName = q.get('shot');

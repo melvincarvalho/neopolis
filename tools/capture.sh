@@ -3,7 +3,7 @@
 set -euo pipefail
 DIR="$(cd "$(dirname "$0")/.." && pwd)"
 CHROME="${CHROME:-chromium}"
-SHOTS=(title overview sprawl raise battle knight swamp quake magnet armageddon win fail)
+SHOTS=(title overview sprawl raise battle knight swamp quake volcano magnet armageddon win fail)
 for s in "${SHOTS[@]}"; do
   "$CHROME" --headless=new --disable-gpu --hide-scrollbars \
     --force-device-scale-factor=2 --window-size=1280,720 \
