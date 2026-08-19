@@ -1624,6 +1624,7 @@ canvas.addEventListener('touchstart', e => {
   e.preventDefault();
   audio();
   if (e.touches.length !== 1) { if (touchS) { clearTimeout(touchS.lp); touchS = null; } return; }
+  if (touchS) clearTimeout(touchS.lp);
   const t = e.touches[0];
   setMouse(t.clientX, t.clientY);
   touchS = { x: t.clientX, y: t.clientY, moved: false, held: false, lp: 0, map: !!G && !G.showTitle && mouse.y > MQ && mouse.y < H - HUD_H };
@@ -1651,6 +1652,9 @@ canvas.addEventListener('touchend', e => {
   if (!touchS.moved && !touchS.held) press(0);
   touchS = null;
 }, { passive: false });
+canvas.addEventListener('touchcancel', () => {   // interrupted touch must not leave a live long-press timer
+  if (touchS) { clearTimeout(touchS.lp); touchS = null; }
+});
 function applyBehavior() {
   if (G.armageddon) return;   // no decrees at the end of the world
   for (const w of G.walkers) if (w.team === 0 && !w.knight) w.mode = G.behavior === 'magnet' && G.magnet[0] ? 'magnet' : 'settle';
