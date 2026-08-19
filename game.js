@@ -931,10 +931,10 @@ function draw() {
     const used = POWER_ORDER.filter(p => pc[p]).map(p => `${p.toUpperCase()} ×${pc[p]}`).join(' · ') || 'NO POWERS CAST';
     if (G.mode === 'won') {
       banner('DOMINION', TEAM[0].col, `THE OTHER GOD IS FORGOTTEN · ${min2}:${String(sec2).padStart(2, '0')} · PEAK POP ${Math.max(...G.stats.pop[0], 1)}`);
-      bannerButton('NEW WORLD  ·  SPACE', TEAM[0].col);
+      bannerButton(TOUCH ? 'NEW WORLD  ·  TAP' : 'NEW WORLD  ·  SPACE', TEAM[0].col);
     } else {
       banner('FORGOTTEN', TEAM[1].col, `YOUR LAST WORSHIPPER FELL · ${min2}:${String(sec2).padStart(2, '0')} · PEAK POP ${Math.max(...G.stats.pop[0], 1)}`);
-      bannerButton('NEW WORLD  ·  SPACE', TEAM[1].col);
+      bannerButton(TOUCH ? 'NEW WORLD  ·  TAP' : 'NEW WORLD  ·  SPACE', TEAM[1].col);
     }
     ctx.font = `700 10px ${MONO}`;
     ctx.textAlign = 'center';
@@ -1206,7 +1206,7 @@ function drawTopBar() {
     const HINTS = [
       'RAISE AND LOWER LAND NEAR YOUR PEOPLE · FLAT LAND GROWS SETTLEMENTS · SETTLEMENTS GROW MANA',
       'WIPE OUT THE OTHER GOD\'S PEOPLE TO WIN · ARMAGEDDON IS THE FINAL CENSUS',
-      'RIGHT-CLICK PLACES THE MAGNET · YOUR LEADER WALKS TO IT · THE FLOCK FOLLOWS THE LEADER',
+      (TOUCH ? 'HOLD THE MAP TO PLACE THE MAGNET' : 'RIGHT-CLICK PLACES THE MAGNET') + ' · YOUR LEADER WALKS TO IT · THE FLOCK FOLLOWS THE LEADER',
     ];
     ctx.globalAlpha = Math.min(1, G.hintT);
     ctx.font = '600 12px Verdana, sans-serif';
@@ -1329,12 +1329,12 @@ function drawHUD() {
     ctx.letterSpacing = '1px';
     ctx.textAlign = 'left';
     ctx.fillStyle = on && !G.armageddon ? '#ffffff' : dead ? 'rgba(160,195,230,0.4)' : 'rgba(190,215,240,0.8)';
-    ctx.fillText(m === 'settle' ? 'GO SETTLE' : (G.magnet[0] ? 'TO THE MAGNET' : 'R-CLICK: PLACE MAGNET'), bhx + 10, by2 + 15);
+    ctx.fillText(m === 'settle' ? 'GO SETTLE' : (G.magnet[0] ? 'TO THE MAGNET' : TOUCH ? 'HOLD MAP: PLACE MAGNET' : 'R-CLICK: PLACE MAGNET'), bhx + 10, by2 + 15);
     ctx.letterSpacing = '0px';
   });
   ctx.font = `700 8.5px ${MONO}`;
   ctx.fillStyle = 'rgba(160,195,230,0.6)';
-  ctx.fillText('B TOGGLES DECREE', bhx, HY + 100);
+  ctx.fillText(TOUCH ? 'TAP TO TOGGLE DECREE' : 'B TOGGLES DECREE', bhx, HY + 100);
   // minimap
   const mmx = 1070, mmy = HY + 12, mms = 92;
   ctx.fillStyle = '#080b14';
@@ -1359,9 +1359,9 @@ function drawHUD() {
   ctx.font = `700 10px ${MONO}`;
   ctx.textAlign = 'left';
   ctx.fillStyle = 'rgba(190,215,240,0.75)';
-  ctx.fillText('WASD PANS', mmx + mms + 14, HY + 50);
-  ctx.fillText('P PAUSES', mmx + mms + 14, HY + 66);
-  ctx.fillText('ESC CLEARS', mmx + mms + 14, HY + 82);
+  ctx.fillText(TOUCH ? 'DRAG PANS' : 'WASD PANS', mmx + mms + 14, HY + 50);
+  ctx.fillText(TOUCH ? 'TAP CASTS' : 'P PAUSES', mmx + mms + 14, HY + 66);
+  ctx.fillText(TOUCH ? 'HOLD: MAGNET' : 'ESC CLEARS', mmx + mms + 14, HY + 82);
   // viewport marker + magnets on the minimap
   const [cvx, cvy] = screenToVertex(VW / 2, MQ + VH / 2);
   ctx.strokeStyle = 'rgba(240,250,255,0.8)'; ctx.lineWidth = 1;
@@ -1490,7 +1490,7 @@ function drawTitle() {
   ctx.letterSpacing = '3px';
   ctx.fillStyle = '#ffffff';
   ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 12;
-  ctx.fillText('PRESS SPACE TO ASCEND', W / 2, ly + 122);
+  ctx.fillText(TOUCH ? 'TAP TO ASCEND' : 'PRESS SPACE TO ASCEND', W / 2, ly + 122);
   ctx.globalAlpha = 1; ctx.shadowBlur = 0;
   ctx.font = '600 13px Verdana, sans-serif';
   ctx.letterSpacing = '3px';
@@ -1498,6 +1498,10 @@ function drawTitle() {
   ctx.fillText('SHAPE THE LAND. YOUR PEOPLE BUILD. THEIR FAITH IS YOUR POWER.', W / 2, 470);
   ctx.fillStyle = 'rgba(160,190,220,0.85)';
   ctx.fillText('RAISE · LOWER · SWAMP · QUAKE · KNIGHT · FLOOD · ARMAGEDDON', W / 2, 498);
+  if (TOUCH && innerHeight > innerWidth) {
+    ctx.fillStyle = '#ffd12a';
+    ctx.fillText('ROTATE YOUR PHONE FOR THE BEST VIEW', W / 2, 530);
+  }
   ctx.letterSpacing = '0px';
   ctx.drawImage(VIGNETTE, 0, 0);
 }
@@ -1505,6 +1509,7 @@ function drawTitle() {
 // ---------- input ----------
 const keys = {};
 let mouse = { x: 0, y: 0 };
+const TOUCH = 'ontouchstart' in window || matchMedia('(pointer: coarse)').matches;
 function screenToVertex(mxx, myy) {
   // iterate heights: pick nearest vertex whose projection is closest
   let best = [N >> 1, N >> 1], bd = 1e9;
@@ -1533,18 +1538,22 @@ window.addEventListener('keydown', e => {
   if (e.key === 'Escape') { G.selPower = 'raise'; G.confirm = null; }
 });
 window.addEventListener('keyup', e => { keys[e.key.length === 1 ? e.key.toLowerCase() : e.key] = false; });
-canvas.addEventListener('mousemove', e => {
+function setMouse(cx, cy) {
   const r = canvas.getBoundingClientRect();
-  mouse.x = (e.clientX - r.left) * (W / r.width);
-  mouse.y = (e.clientY - r.top) * (H / r.height);
+  mouse.x = (cx - r.left) * (W / r.width);
+  mouse.y = (cy - r.top) * (H / r.height);
   if (G && !G.showTitle && mouse.y > MQ && mouse.y < H - HUD_H) {
     const [vx, vy] = screenToVertex(mouse.x, mouse.y);
     G.cursor.vx = vx; G.cursor.vy = vy;
   }
+}
+canvas.addEventListener('mousemove', e => {
+  setMouse(e.clientX, e.clientY);
   canvas.style.cursor = (G && !G.showTitle && (mouse.y > H - HUD_H || G.mode !== 'play')) ? 'pointer' : 'crosshair';
 });
 canvas.addEventListener('contextmenu', e => e.preventDefault());
-canvas.addEventListener('mousedown', e => {
+canvas.addEventListener('mousedown', e => press(e.button));
+function press(button) {   // button 0: cast/UI · button 2: papal magnet — shared by mouse and touch
   audio();
   if (G.showTitle) { G.showTitle = false; newGame((Math.random() * 1e9) >>> 0, false); return; }
   if ((G.mode === 'won' || G.mode === 'lost') && G.modeT > 0.6) {
@@ -1570,7 +1579,7 @@ canvas.addEventListener('mousedown', e => {
   }
   if (G.mode !== 'play' || G.paused) return;
   const { vx, vy } = G.cursor;
-  if (e.button === 2) {   // right-click: papal magnet
+  if (button === 2) {   // right-click / long-press: papal magnet
     G.magnet[0] = [vx + 0.5, vy + 0.5];
     SFX.magnet();
     if (G.behavior === 'magnet') applyBehavior();
@@ -1608,7 +1617,40 @@ canvas.addEventListener('mousedown', e => {
   } else if (ok && (G.selPower === 'knight' || G.selPower === 'flood' || G.selPower === 'armageddon')) {
     G.selPower = 'raise';   // one-shot powers disarm themselves
   }
-});
+}
+// touch: tap casts, one-finger drag pans, hold places the papal magnet
+let touchS = null;
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  audio();
+  if (e.touches.length !== 1) { if (touchS) { clearTimeout(touchS.lp); touchS = null; } return; }
+  const t = e.touches[0];
+  setMouse(t.clientX, t.clientY);
+  touchS = { x: t.clientX, y: t.clientY, moved: false, held: false, lp: 0, map: !!G && !G.showTitle && mouse.y > MQ && mouse.y < H - HUD_H };
+  if (touchS.map) touchS.lp = setTimeout(() => { if (touchS && !touchS.moved) { touchS.held = true; press(2); } }, 450);
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!touchS || e.touches.length !== 1) return;
+  const t = e.touches[0];
+  if (!touchS.moved && Math.hypot(t.clientX - touchS.x, t.clientY - touchS.y) < 9) return;
+  touchS.moved = true;
+  clearTimeout(touchS.lp);
+  if (touchS.map) {   // the world follows the finger
+    const r = canvas.getBoundingClientRect();
+    G.cam.x -= (t.clientX - touchS.x) * (W / r.width);
+    G.cam.y -= (t.clientY - touchS.y) * (H / r.height);
+  }
+  touchS.x = t.clientX; touchS.y = t.clientY;
+  setMouse(t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (!touchS) return;
+  clearTimeout(touchS.lp);
+  if (!touchS.moved && !touchS.held) press(0);
+  touchS = null;
+}, { passive: false });
 function applyBehavior() {
   if (G.armageddon) return;   // no decrees at the end of the world
   for (const w of G.walkers) if (w.team === 0 && !w.knight) w.mode = G.behavior === 'magnet' && G.magnet[0] ? 'magnet' : 'settle';
