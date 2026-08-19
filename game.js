@@ -1025,23 +1025,20 @@ function drawTile(tx, ty) {
   // altitude carries the palette; the sun carries the relief
   let [r, g, b] = hypso(avg);
   r *= lum; g *= lum; b *= lum;
+  const tint = poisoned ? null : tileTeamTint(tx, ty);
   if (poisoned) {
     const ember = 0.5 + Math.sin(G.time * 3 + tx * 2 + ty) * 0.3;
     const lp = 0.35 + lum * 0.35;
     r = 60 + lp * 70 + ember * 30; g = 34 + lp * 42; b = 30 + lp * 40;
-  } else {
-    const tint = tileTeamTint(tx, ty);
-    if (tint) {
-      const [team, k] = tint;
-      const tc = team === 0 ? [45, 175, 220] : [230, 48, 110];
-      r += (tc[0] - r) * k * 0.55; g += (tc[1] - g) * k * 0.55; b += (tc[2] - b) * k * 0.55;
-    }
+  } else if (tint) {
+    const [team, k] = tint;
+    const tc = team === 0 ? [45, 175, 220] : [230, 48, 110];
+    r += (tc[0] - r) * k * 0.55; g += (tc[1] - g) * k * 0.55; b += (tc[2] - b) * k * 0.55;
   }
   ctx.fillStyle = `rgb(${clamp(r, 0, 255) | 0},${clamp(g, 0, 255) | 0},${clamp(b, 0, 255) | 0})`;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
   if (flat && !poisoned) {
     // buildable land reads as farmed: a visible grid, in the owner's color where held
-    const tint = tileTeamTint(tx, ty);
     if (tint) {
       ctx.strokeStyle = hexA(TEAM[tint[0]].col, 0.08 + tint[1] * 0.16);
     } else {
