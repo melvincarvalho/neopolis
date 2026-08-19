@@ -255,7 +255,7 @@ function castRaise(team, vx, vy, dir) {
   G.stats.deform[team]++;
   recalcSetts();
   (dir > 0 ? SFX.raise : SFX.lower)();
-  addBurst(vx, vy, '#8a7d6a', 10);
+  addBurst(vx, vy, '#c9b98c', 10);
   addRing(vx, vy, TEAM[team].col);
   logPower(team, dir > 0 ? 'raise' : 'lower');
   return true;
@@ -286,7 +286,7 @@ function castQuake(team, vx, vy) {
   G.shake = 9;
   recalcSetts();
   SFX.quake(); logPower(team, 'quake');
-  for (let i = 0; i < 9; i++) addBurst(vx + rng(-3, 3), vy + rng(-3, 3), '#8a7d6a', 5);
+  for (let i = 0; i < 9; i++) addBurst(vx + rng(-3, 3), vy + rng(-3, 3), '#c9b98c', 5);
   return true;
 }
 function leaderOf(team) {
@@ -815,6 +815,22 @@ const VIGNETTE = (() => {
 function worldToScreen(gx, gy, h) {
   return [isoX(gx, gy) - G.cam.x + VW / 2, isoY(gx, gy, h) - G.cam.y];
 }
+// hypsometric tints: altitude is the story, so altitude gets the palette.
+// deep indigo lowland -> steel plains -> highland slate -> pale ice peaks
+const HYPSO = [
+  [30, 42, 80],
+  [46, 62, 104],
+  [68, 88, 128],
+  [98, 120, 152],
+  [140, 162, 188],
+  [196, 214, 232],
+];
+function hypso(h) {
+  const t = clamp(h / HMAX, 0, 1) * (HYPSO.length - 1);
+  const i = Math.min(HYPSO.length - 2, t | 0), f = t - i;
+  const a = HYPSO[i], b = HYPSO[i + 1];
+  return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f];
+}
 function tileTeamTint(tx, ty) {
   // nearest influence colors the land
   let bd = 81, team = -1;
@@ -864,16 +880,32 @@ function draw() {
     const [bx2, by2] = worldToScreen(N / 2, N / 2, hVisAt(N >> 1, N >> 1));
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
+    // outer bloom: the pillar of the last day
     const beam = ctx.createLinearGradient(bx2, by2 - VH, bx2, by2);
-    beam.addColorStop(0, 'rgba(255,60,80,0)');
-    beam.addColorStop(0.7, `rgba(255,70,90,${0.16 + Math.sin(G.time * 4) * 0.06})`);
-    beam.addColorStop(1, `rgba(255,120,140,${0.35 + Math.sin(G.time * 4) * 0.1})`);
+    beam.addColorStop(0, 'rgba(255,60,80,0.05)');
+    beam.addColorStop(0.6, `rgba(255,70,90,${0.24 + Math.sin(G.time * 4) * 0.08})`);
+    beam.addColorStop(1, `rgba(255,130,150,${0.5 + Math.sin(G.time * 4) * 0.12})`);
     ctx.fillStyle = beam;
-    const bw3 = 26 + Math.sin(G.time * 3) * 5;
+    const bw3 = 40 + Math.sin(G.time * 3) * 8;
     ctx.fillRect(bx2 - bw3 / 2, by2 - VH, bw3, VH);
-    ctx.beginPath(); ctx.ellipse(bx2, by2, 30, 13, 0, 0, 7);
-    ctx.fillStyle = `rgba(255,90,110,${0.25 + Math.sin(G.time * 5) * 0.1})`;
-    ctx.fill();
+    // white-hot core
+    const core = ctx.createLinearGradient(bx2, by2 - VH, bx2, by2);
+    core.addColorStop(0, 'rgba(255,220,230,0)');
+    core.addColorStop(0.75, `rgba(255,225,235,${0.22 + Math.sin(G.time * 6) * 0.08})`);
+    core.addColorStop(1, `rgba(255,245,250,${0.55 + Math.sin(G.time * 6) * 0.12})`);
+    ctx.fillStyle = core;
+    const cw3 = 9 + Math.sin(G.time * 5) * 2;
+    ctx.fillRect(bx2 - cw3 / 2, by2 - VH, cw3, VH);
+    // impact pool + expanding summons ring
+    const ig = ctx.createRadialGradient(bx2, by2, 0, bx2, by2, 70);
+    ig.addColorStop(0, `rgba(255,120,140,${0.4 + Math.sin(G.time * 5) * 0.12})`);
+    ig.addColorStop(1, 'rgba(255,60,80,0)');
+    ctx.fillStyle = ig;
+    ctx.beginPath(); ctx.ellipse(bx2, by2, 70, 30, 0, 0, 7); ctx.fill();
+    const rr = 20 + (G.time * 60) % 90;
+    ctx.strokeStyle = `rgba(255,140,160,${0.5 * (1 - ((G.time * 60) % 90) / 90)})`;
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.ellipse(bx2, by2, rr, rr * 0.44, 0, 0, 7); ctx.stroke();
     ctx.restore();
   }
   // magnets
@@ -898,8 +930,11 @@ function draw() {
       ctx.fillStyle = hexA('#5aff9e', 0.5);
       ctx.beginPath(); ctx.ellipse(sx, sy, 6, 2.5, 0, 0, 7); ctx.fill();
     } else {
-      ctx.globalAlpha = k * 0.9;
-      ctx.strokeStyle = p.color; ctx.lineWidth = 2;
+      ctx.globalAlpha = k * 0.95;
+      ctx.strokeStyle = p.color; ctx.lineWidth = 2.5;
+      ctx.beginPath(); ctx.ellipse(sx, sy, p.r * 2, p.r, 0, 0, 7); ctx.stroke();
+      ctx.globalAlpha = k * 0.35;
+      ctx.lineWidth = 5;
       ctx.beginPath(); ctx.ellipse(sx, sy, p.r * 2, p.r, 0, 0, 7); ctx.stroke();
     }
   }
@@ -916,7 +951,13 @@ function draw() {
   }
   ctx.globalAlpha = 1;
   if (G.armageddon) {
-    ctx.fillStyle = `rgba(255,30,50,${Math.min(0.16, 0.06 + G.argT * 0.01) + Math.sin(G.time * 2) * 0.02})`;
+    // the sky bleeds from above: a ramping wash, heavier at the zenith
+    const wk = Math.min(0.3, 0.12 + G.argT * 0.015) + Math.sin(G.time * 2) * 0.03;
+    const wg = ctx.createLinearGradient(0, 0, 0, VH);
+    wg.addColorStop(0, `rgba(120,10,30,${wk + 0.12})`);
+    wg.addColorStop(0.5, `rgba(255,30,50,${wk})`);
+    wg.addColorStop(1, `rgba(160,20,40,${wk * 0.7})`);
+    ctx.fillStyle = wg;
     ctx.fillRect(0, 0, VW, VH);
   }
   ctx.restore();
@@ -955,14 +996,18 @@ function drawTile(tx, ty) {
   if (Math.max(x0, x1, x2, x3) < -40 || Math.min(x0, x1, x2, x3) > VW + 40) return;
   if (Math.max(y0, y1, y2, y3) < -60 || Math.min(y0, y1, y2, y3) > VH + 60) return;
   if (water) {
-    // the ocean has depth: darker as it leaves the coast, with a breathing shore band
+    // the ocean has depth: an indigo abyss climbing to teal shallows, with a breathing shore band
     const cd = G.coast ? G.coast[ty * N + tx] : 9;
-    const k2 = Math.max(0, 1 - cd / 5);
+    const k2 = Math.max(0, 1 - cd / 6);
     const wave = Math.sin(G.time * 1.4 + (tx + ty) * 0.7) * 0.5 + 0.5;
-    ctx.fillStyle = `rgb(${6 + k2 * 14 | 0},${10 + k2 * (26 + wave * 8) | 0},${20 + k2 * (46 + wave * 10) | 0})`;
+    ctx.fillStyle = `rgb(${9 + k2 * 16 | 0},${15 + k2 * (48 + wave * 10) | 0},${36 + k2 * (66 + wave * 12) | 0})`;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
     if (cd === 1) {
-      ctx.strokeStyle = hexA('#6e86c8', 0.12 + wave * 0.12);
+      ctx.strokeStyle = hexA('#7fd8ff', 0.2 + wave * 0.22);
+      ctx.lineWidth = 1.2;
+      ctx.stroke();
+    } else if (cd === 2) {
+      ctx.strokeStyle = hexA('#5f8fd8', 0.08 + wave * 0.1);
       ctx.lineWidth = 1;
       ctx.stroke();
     }
@@ -975,39 +1020,49 @@ function drawTile(tx, ty) {
   // one sun, from the north-west: facets facing it brighten, away-facets fall dark
   const nx2 = (h00 + h01 - h10 - h11) * 0.5;   // slope toward +x
   const ny2 = (h00 + h10 - h01 - h11) * 0.5;   // slope toward +y
-  let lum = 0.15 + avg * 0.035 + nx2 * 0.09 + ny2 * 0.055;
-  lum = clamp(lum, 0.05, 0.85);
-  let r = 30 + lum * 105, g = 38 + lum * 118, b = 56 + lum * 138;
+  let lum = 1 + nx2 * 0.30 + ny2 * 0.18;
+  lum = clamp(lum, 0.5, 1.55);
+  // altitude carries the palette; the sun carries the relief
+  let [r, g, b] = hypso(avg);
+  r *= lum; g *= lum; b *= lum;
   if (poisoned) {
     const ember = 0.5 + Math.sin(G.time * 3 + tx * 2 + ty) * 0.3;
-    r = 40 + lum * 60 + ember * 26; g = 26 + lum * 40; b = 24 + lum * 40;
+    const lp = 0.35 + lum * 0.35;
+    r = 60 + lp * 70 + ember * 30; g = 34 + lp * 42; b = 30 + lp * 40;
   } else {
     const tint = tileTeamTint(tx, ty);
     if (tint) {
       const [team, k] = tint;
-      const tc = team === 0 ? [40, 160, 200] : [200, 40, 90];
-      r += (tc[0] - r) * k * 0.35; g += (tc[1] - g) * k * 0.35; b += (tc[2] - b) * k * 0.35;
+      const tc = team === 0 ? [45, 175, 220] : [230, 48, 110];
+      r += (tc[0] - r) * k * 0.55; g += (tc[1] - g) * k * 0.55; b += (tc[2] - b) * k * 0.55;
     }
   }
-  ctx.fillStyle = `rgb(${r | 0},${g | 0},${b | 0})`;
+  ctx.fillStyle = `rgb(${clamp(r, 0, 255) | 0},${clamp(g, 0, 255) | 0},${clamp(b, 0, 255) | 0})`;
   ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.fill();
   if (flat && !poisoned) {
-    ctx.strokeStyle = 'rgba(110,125,175,0.08)';
+    // buildable land reads as farmed: a visible grid, in the owner's color where held
+    const tint = tileTeamTint(tx, ty);
+    if (tint) {
+      ctx.strokeStyle = hexA(TEAM[tint[0]].col, 0.08 + tint[1] * 0.16);
+    } else {
+      ctx.strokeStyle = 'rgba(140,160,210,0.09)';
+    }
     ctx.lineWidth = 1;
     ctx.stroke();
   }
   // cliff faces: darken the drop and rim the edge
   if (slope >= 2) {
-    ctx.fillStyle = `rgba(0,0,10,${Math.min(0.35, slope * 0.09)})`;
+    ctx.fillStyle = `rgba(0,0,14,${Math.min(0.4, slope * 0.1)})`;
     ctx.fill();
-    ctx.strokeStyle = hexA('#5a6da8', 0.14 + slope * 0.05);
+    ctx.strokeStyle = hexA('#7f93d8', 0.18 + slope * 0.06);
     ctx.lineWidth = 1.2;
     ctx.beginPath(); ctx.moveTo(x3, y3); ctx.lineTo(x2, y2); ctx.lineTo(x1, y1); ctx.stroke();
   }
   const coast = H00 <= G.water || H10 <= G.water || H01 <= G.water || H11 <= G.water;
   if (coast) {
-    ctx.strokeStyle = hexA('#5f79c2', 0.28 + Math.sin(G.time * 2 + tx + ty) * 0.08);
-    ctx.lineWidth = 1.4;
+    // the island's silhouette is the most important line on screen
+    ctx.strokeStyle = hexA('#8fd8ff', 0.36 + Math.sin(G.time * 2 + tx + ty) * 0.1);
+    ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(x0, y0); ctx.lineTo(x1, y1); ctx.lineTo(x2, y2); ctx.lineTo(x3, y3); ctx.closePath(); ctx.stroke();
   }
 }
@@ -1035,7 +1090,7 @@ function drawSett(s) {
   const [sx, sy] = worldToScreen(s.tx + 0.5, s.ty + 0.5, hVisAt(s.tx, s.ty));
   const c = TEAM[s.team].col;
   const lv = s.level;
-  const wpx = 8 + lv * 1.6, hpx = 6 + lv * 3.4;
+  const wpx = 8 + lv * 2.1, hpx = 6 + lv * 4.2;
   ctx.save();
   if (s.growT > 0) { const g2 = 1 + s.growT * 0.6; ctx.translate(sx, sy); ctx.scale(g2, g2); ctx.translate(-sx, -sy); }
   // contact shadow: the building sits on its ground
@@ -1043,10 +1098,10 @@ function drawSett(s) {
   ctx.beginPath(); ctx.ellipse(sx, sy + 1, wpx + 4, (wpx + 4) / 2.1, 0, 0, 7); ctx.fill();
   // ground glow pool
   ctx.globalCompositeOperation = 'lighter';
-  const gp = ctx.createRadialGradient(sx, sy, 0, sx, sy, 26 + lv * 3);
-  gp.addColorStop(0, hexA(c, 0.14)); gp.addColorStop(1, 'rgba(0,0,0,0)');
+  const gp = ctx.createRadialGradient(sx, sy, 0, sx, sy, 26 + lv * 4);
+  gp.addColorStop(0, hexA(c, 0.12 + lv * 0.015)); gp.addColorStop(1, 'rgba(0,0,0,0)');
   ctx.fillStyle = gp;
-  ctx.beginPath(); ctx.ellipse(sx, sy, 26 + lv * 3, (26 + lv * 3) / 2, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.ellipse(sx, sy, 26 + lv * 4, (26 + lv * 4) / 2, 0, 0, 7); ctx.fill();
   ctx.globalCompositeOperation = 'source-over';
   // building: stacked prisms, more mass per level
   const stories = Math.ceil(lv / 3);
@@ -1062,9 +1117,9 @@ function drawSett(s) {
     ctx.beginPath(); ctx.moveTo(sx, by - hh); ctx.lineTo(sx + wc, by - hh * 1.4); ctx.lineTo(sx, by - hh * 1.8); ctx.lineTo(sx - wc, by - hh * 1.4); ctx.closePath(); ctx.fill();
   }
   // neon roof rim + beacon for the big ones
-  ctx.strokeStyle = c; ctx.lineWidth = 1.4;
+  ctx.strokeStyle = c; ctx.lineWidth = 1.7;
   ctx.save();
-  ctx.shadowColor = c; ctx.shadowBlur = 8;
+  ctx.shadowColor = c; ctx.shadowBlur = 11;
   const topY = sy - hpx * 0.4 - hpx;
   ctx.beginPath(); ctx.moveTo(sx - wpx * (1 - (stories - 1) * 0.22), sy - (stories - 1) * (hpx / stories) - (hpx / stories) * 1.4);
   ctx.lineTo(sx, sy - (stories - 1) * (hpx / stories) - (hpx / stories) * 1.8);
@@ -1083,10 +1138,10 @@ function drawSett(s) {
   }
   // window glow: occupancy made visible — no debug digits
   const rows = Math.min(3, Math.ceil(lv / 3)), cols = Math.min(4, Math.ceil(lv / 2));
-  ctx.fillStyle = hexA(c, 0.75 + (s.growT > 0 ? 0.25 : 0));
+  ctx.fillStyle = shade(c, s.growT > 0 ? 0.6 : 0.45);   // lit windows, near-white in the team's hue
   for (let ry = 0; ry < rows; ry++) for (let cx2 = 0; cx2 < cols; cx2++) {
     if ((s.id + ry * 3 + cx2) % 5 === 0) continue;   // some windows dark
-    ctx.fillRect(sx - wpx * 0.5 + 3 + cx2 * 5, sy - 5 - ry * (hpx / (rows + 1)) - hpx * 0.35, 1.6, 2.4);
+    ctx.fillRect(sx - wpx * 0.5 + 3 + cx2 * 5, sy - 5 - ry * (hpx / (rows + 1)) - hpx * 0.35, 2, 3);
   }
   // digit only under the god's cursor
   if (!G.attract && Math.abs(G.cursor.vx - s.tx) <= 1 && Math.abs(G.cursor.vy - s.ty) <= 1) {
@@ -1343,8 +1398,16 @@ function drawHUD() {
   const sc = mms / N;
   for (let y = 0; y < N - 1; y += 1) for (let x = 0; x < N - 1; x += 1) {
     const h = hAt(x, y);
-    if (h <= G.water) continue;
-    ctx.fillStyle = `rgba(${60 + h * 14},${75 + h * 16},${100 + h * 15},0.9)`;
+    if (h <= G.water) {
+      // the sea is part of the map: abyss with a lit shore
+      const cd = G.coast ? G.coast[y * N + x] : 9;
+      ctx.fillStyle = cd <= 1 ? 'rgba(26,50,96,0.95)' : 'rgba(11,19,46,0.95)';
+    } else if (G.poison.has(y * N + x)) {
+      ctx.fillStyle = 'rgba(150,64,42,0.95)';
+    } else {
+      const mc = hypso(h);
+      ctx.fillStyle = `rgba(${mc[0] | 0},${mc[1] | 0},${mc[2] | 0},0.95)`;
+    }
     ctx.fillRect(mmx + x * sc, mmy + y * sc, sc + 0.5, sc + 0.5);
   }
   for (const s of G.setts) {
@@ -1459,7 +1522,7 @@ function drawTitle() {
     }
   }
   ctx.restore();
-  ctx.fillStyle = 'rgba(5,6,12,0.55)';
+  ctx.fillStyle = 'rgba(5,6,12,0.3)';   // let the land glow through: the terrain is the pitch
   ctx.fillRect(0, 0, W, H);
   const by = 96, bh = 320;
   ctx.fillStyle = 'rgba(5,8,15,0.9)';
@@ -1475,10 +1538,12 @@ function drawTitle() {
   ctx.font = '900 92px "Arial Black", Arial, sans-serif';
   ctx.letterSpacing = '10px';
   ctx.save();
-  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 16;
+  ctx.shadowColor = '#33d6ff'; ctx.shadowBlur = 18;
   ctx.fillStyle = '#7fdcff'; ctx.fillText('NEOPOLIS', W / 2, ly);
   ctx.shadowBlur = 4;
-  ctx.fillStyle = '#ffffff'; ctx.fillText('NEOPOLIS', W / 2, ly);
+  const tg = ctx.createLinearGradient(0, ly - 74, 0, ly);
+  tg.addColorStop(0, '#ffffff'); tg.addColorStop(0.62, '#eafaff'); tg.addColorStop(1, '#6fd4ff');
+  ctx.fillStyle = tg; ctx.fillText('NEOPOLIS', W / 2, ly);
   ctx.restore();
   ctx.letterSpacing = '5px';
   ctx.font = '600 17px Verdana, sans-serif';
